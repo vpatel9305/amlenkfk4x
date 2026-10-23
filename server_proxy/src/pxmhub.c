@@ -1991,7 +1991,7 @@ void ism_mhub_getKafkaConnectionJson(ism_json_t * jobj, ism_mhub_t * mhub, const
         ism_json_putStringItem(jobj, "KeyMap", mhub->keymap);
     if (mhub->partitionMap)
         ism_json_putStringItem(jobj, "PartitionRule",mhub->partitionMap);
-    if (mhub->apiVersion >= 0 && mhub->apiVersion <= 2) {
+    if (mhub->apiVersion >= 0 && mhub->apiVersion <= 3) {
         ism_json_putIntegerItem(jobj, "KafkaAPIVersion", mhub->apiVersion);
     }
     ism_json_endObject(jobj);
@@ -3907,24 +3907,71 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
     							(mhub->trybroker>0)?mhub->brokers[mhub->trybroker-1]:mhub->brokers[0]);
 
     /*
-     * Check for the type of response based on the correlation ID
+     * Check for the type of response based on the correlation ID.
+     *
+     * MetadataResponse v0-v8  – legacy: INT32 broker/topic array lengths,
+     *                            INT16 strings, no tagged-fields bytes.
+     * MetadataResponse v9+    – flexible: compact-array lengths (varint),
+     *                            compact strings, per-entry tagged-fields bytes.
+     * We detect flexible encoding from the mhub's negotiated verMetadata.
      */
     if (corrid == 0x20000) {             /* Metadata */
-        int broker_cnt = ism_kafka_getInt4(buf);
+        int flex_meta = (mhub->verMetadata >= KAFKA_METADATA_FLEXIBLE_VERSION);
+
+        /* throttle_time_ms is present in v3+ responses (INT32, non-flexible) */
+        if (mhub->verMetadata >= 3 && !flex_meta)
+            ism_kafka_getInt4(buf);   /* throttle_time_ms */
+
+        int broker_cnt;
+        if (flex_meta)
+            broker_cnt = getKafkaCompactArrayLen(buf);
+        else
+            broker_cnt = ism_kafka_getInt4(buf);
+        if (broker_cnt < 0) broker_cnt = 0;
+
         mhub_broker_list_t * brokers = alloca(broker_cnt * sizeof(mhub_broker_list_t));
         for (i=0; i<broker_cnt; i++) {
             brokers[i].nodeid  = ism_kafka_getInt4(buf);
-            brokers[i].broker_len = ism_kafka_getString(buf, (char * *)&brokers[i].broker);
+            if (flex_meta)
+                brokers[i].broker_len = getKafkaCompactString(buf, (char **)&brokers[i].broker);
+            else
+                brokers[i].broker_len = ism_kafka_getString(buf, (char * *)&brokers[i].broker);
             brokers[i].port = (uint16_t) ism_kafka_getInt4(buf);
+            if (flex_meta) {
+                ism_kafka_getInt4(buf);   /* rack (nullable compact string length varint); skip */
+                skipKafkaTagBuf(buf);     /* per-broker tagged-fields */
+            }
             TRACE(8, "MessageHub broker metadata: arrayindex=%d nodeid=%d broker=%s port=%d\n",
             			i, brokers[i].nodeid, brokers[i].broker, brokers[i].port);
         }
-        int topic_count = ism_kafka_getInt4(buf);
+
+        /* cluster_id (nullable compact string) and controller_id (INT32) in v2+ flexible */
+        if (flex_meta) {
+            skipKafkaTagBuf(buf);         /* cluster_id compact-string (skip varint + bytes) */
+            ism_kafka_getInt4(buf);       /* controller_id */
+        }
+
+        int topic_count;
+        if (flex_meta)
+            topic_count = getKafkaCompactArrayLen(buf);
+        else
+            topic_count = ism_kafka_getInt4(buf);
+        if (topic_count < 0) topic_count = 0;
+
         for (i=0; rc==0 && i<topic_count; i++) {
             char * topicstr;
             int topicrc = ism_kafka_getInt2(buf);
-            int topiclen = ism_kafka_getString(buf, &topicstr);
-            int part_cnt = ism_kafka_getInt4(buf);
+            int topiclen;
+            if (flex_meta)
+                topiclen = getKafkaCompactString(buf, &topicstr);
+            else
+                topiclen = ism_kafka_getString(buf, &topicstr);
+            int part_cnt;
+            if (flex_meta)
+                part_cnt = getKafkaCompactArrayLen(buf);
+            else
+                part_cnt = ism_kafka_getInt4(buf);
+            if (part_cnt < 0) part_cnt = 0;
             if (ism_kafka_more(buf)<0 || part_cnt >= 0x10000 || topiclen < 1) {
             	TRACE(5, "MessageHub metadata incomplete: connect=%u name=%s morebuf=%d part_cnt=%d topiclen=%d\n",
             			transport->index, transport->name,ism_kafka_more(buf)<0, part_cnt, topiclen);
@@ -3936,10 +3983,21 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                     int partrc =  ism_kafka_getInt2(buf);
                     int partid =  ism_kafka_getInt4(buf);
                     int leader =  ism_kafka_getInt4(buf);
-                    int replica = ism_kafka_getInt4(buf) & 0xffff;
-                    buf->pos += 4 * replica;   /* Skip over replica info */
-                    isr =         ism_kafka_getInt4(buf) & 0xffff;
-                    buf->pos += 4 * isr;       /* Skip over isr info */
+                    int replica;
+                    if (flex_meta)
+                        replica = getKafkaCompactArrayLen(buf);
+                    else
+                        replica = ism_kafka_getInt4(buf) & 0xffff;
+                    if (replica < 0) replica = 0;
+                    buf->pos += 4 * replica;   /* Skip over replica node-id array */
+                    if (flex_meta)
+                        isr = getKafkaCompactArrayLen(buf);
+                    else
+                        isr = ism_kafka_getInt4(buf) & 0xffff;
+                    if (isr < 0) isr = 0;
+                    buf->pos += 4 * isr;       /* Skip over isr node-id array */
+                    if (flex_meta)
+                        skipKafkaTagBuf(buf);   /* per-partition tagged-fields */
                     if (ism_kafka_more(buf) >= 0) {
                         processPartMetadata(mhub, brokers, broker_cnt, topicstr, topiclen, partid, partrc, leader);
                     } else {
@@ -3948,8 +4006,12 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                         rc = 2;
                     }
                 }
+                if (flex_meta)
+                    skipKafkaTagBuf(buf);       /* per-topic tagged-fields */
             }
         }
+        if (flex_meta)
+            skipKafkaTagBuf(buf);               /* response body tagged-fields */
         mhub->expectingMetadata = 0;
     }
     if (rc) {
