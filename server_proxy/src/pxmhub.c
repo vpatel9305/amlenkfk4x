@@ -3707,22 +3707,37 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
 
         /*
          * SaslHandshakeResponse
+         * v0/v1 – INT16 error_code, ARRAY<STRING> enabled_mechanisms.
+         * v2+   – flexible: INT16 error_code, compact-array<compact-string>,
+         *         response body tagged-fields byte.
          */
-        case 0x30000:
+        case 0x30000: {
+            int flex_hs = (mhub->verSaslHandshake >= 2);
             rc = ism_kafka_getInt2(&obuf);
+            if (flex_hs)
+                skipKafkaTagBuf(&obuf);   /* response body tagged-fields */
             if (rc == 0) {
                 sendSASL(transport, &obuf, 2);
                 return 0;
             }
             break;
+        }
 
         /*
          * SaslAuthenticateResponse
+         * v0   – INT16 error_code, STRING error_message, BYTES auth_bytes.
+         * v1   – adds session_lifetime_ms (INT64) at the end.
+         * v2+  – flexible: INT16 error_code, compact-string error_message,
+         *        compact-bytes auth_bytes, INT64 session_lifetime_ms,
+         *        response body tagged-fields byte.
          */
-        case 0x30002:
-
+        case 0x30002: {
+            int flex_auth = (mhub->verSaslAuthenticate != 0xff && mhub->verSaslAuthenticate >= 2);
             rc  = ism_kafka_getInt2(buf);
-            reasonlen = ism_kafka_getString(buf, &reason);
+            if (flex_auth)
+                reasonlen = getKafkaCompactString(buf, &reason);
+            else
+                reasonlen = ism_kafka_getString(buf, &reason);
             if (reasonlen && reason) {
                 char * temp = alloca(reasonlen + 1);
                 memcpy(temp, reason, reasonlen);
@@ -3807,6 +3822,7 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
             }
 
             break;
+        }
 
         /*
          * ApiVersionsResponse
@@ -4412,9 +4428,12 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                 ism_kafka_putInt2(buf, SaslAuthenticateRequest);  /* API key 36 */
                 ism_kafka_putInt2(buf, sasl_auth_ver);
                 ism_kafka_putInt4(buf, 0x30002);  /* SaslAuthenticate correlation ID */
-                ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
-                if (sasl_auth_ver >= 2)
+                if (sasl_auth_ver >= 2) {
+                    putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                     putKafkaTagBuf(buf);          /* request header tagged-fields */
+                } else {
+                    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
+                }
                 ism_kafka_putInt4(buf, 2 + userlen + passwordlen);
             }
             ism_kafka_putInt1(buf, 0);
@@ -4446,9 +4465,12 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                     ism_kafka_putInt2(buf, SaslAuthenticateRequest);  /* API key 36 */
                     ism_kafka_putInt2(buf, sasl_auth_ver);
                     ism_kafka_putInt4(buf, 0x30002);  /* SaslAuthenticate correlation ID */
-                    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1); /*Client ID*/
-                    if (sasl_auth_ver >= 2)
+                    if (sasl_auth_ver >= 2) {
+                        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                         putKafkaTagBuf(buf);      /* request header tagged-fields */
+                    } else {
+                        ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
+                    }
                     ism_kafka_putInt4(buf, first_msg_buf.used); //body length
                 }
                 char * first_message = alloca(first_msg_buf.used+1);
@@ -4487,9 +4509,12 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                    ism_kafka_putInt2(buf, SaslAuthenticateRequest);  /* API key 36 */
                    ism_kafka_putInt2(buf, sasl_auth_ver);
                    ism_kafka_putInt4(buf, 0x30002);  /* SaslAuthenticate correlation ID */
-                   ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1); /*Client ID*/
-                   if (sasl_auth_ver >= 2)
+                   if (sasl_auth_ver >= 2) {
+                       putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                        putKafkaTagBuf(buf);       /* request header tagged-fields */
+                   } else {
+                       ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
+                   }
                    ism_kafka_putInt4(buf, client_final_message_outbuf.used); //body length
                }
 
@@ -4522,26 +4547,58 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
             transport->send(transport, buf->buf+4, buf->used-4, 0, SFLAG_FRAMESPACE);
             TRACE(7, "Send SASL connect=%u name=%s\n", transport->index, transport->name);
         } else {
+            /*
+             * SaslHandshakeRequest:
+             * v0 – legacy: request header v1 (INT16 clientId), STRING mechanism, no tagged-fields.
+             * v1 – same wire format as v0 (still request header v1).
+             * v2+– flexible: request header v2 (compact-string clientId + tagged-fields byte),
+             *      compact-string mechanism, body tagged-fields byte.
+             * Kafka 4.x reports verSaslHandshake=2; use flexible encoding for >= 2.
+             */
+            int flex_handshake = (mhub->verSaslHandshake != 0xFF && mhub->verSaslHandshake >= 2);
+            uint8_t handshake_ver = 0;
             ism_kafka_putInt2(buf, SaslHandshakeRequest);
             if (mhub->verSaslHandshake == 0) {
+                handshake_ver = 0;
                 ism_kafka_putInt2(buf, 0);
                 transport->pobj->auth_require = 1;
                 transport->frame = ism_transport_frameNone;
+            } else if (flex_handshake) {
+                handshake_ver = 2;
+                ism_kafka_putInt2(buf, 2);
+                transport->pobj->auth_require = 0;
             } else {
+                handshake_ver = 1;
                 ism_kafka_putInt2(buf, 1);
                 transport->pobj->auth_require = 0;
             }
             ism_kafka_putInt4(buf, 0x30000);  /* SaslHandshakeRequest correlation ID */
-            ism_kafka_putString(buf, transport->name, -1);
-            if(mhub->sasl_mechanism == SASL_MECHANISM_PLAIN){
-                ism_kafka_putString(buf, "PLAIN", -1);
-            }else if(mhub->sasl_mechanism == SASL_MECHANISM_SCRAM_SHA_512){
-                ism_kafka_putString(buf, "SCRAM-SHA-512", -1);
-            }else if(mhub->sasl_mechanism == SASL_MECHANISM_SCRAM_SHA_256){
-                ism_kafka_putString(buf, "SCRAM-SHA-256", -1);
+            if (flex_handshake) {
+                putKafkaCompactString(buf, transport->name, -1);  /* compact-string clientId */
+                putKafkaTagBuf(buf);                              /* request header tagged-fields */
+            } else {
+                ism_kafka_putString(buf, transport->name, -1);   /* INT16 clientId */
             }
+            if (mhub->sasl_mechanism == SASL_MECHANISM_PLAIN) {
+                if (flex_handshake)
+                    putKafkaCompactString(buf, "PLAIN", -1);
+                else
+                    ism_kafka_putString(buf, "PLAIN", -1);
+            } else if (mhub->sasl_mechanism == SASL_MECHANISM_SCRAM_SHA_512) {
+                if (flex_handshake)
+                    putKafkaCompactString(buf, "SCRAM-SHA-512", -1);
+                else
+                    ism_kafka_putString(buf, "SCRAM-SHA-512", -1);
+            } else if (mhub->sasl_mechanism == SASL_MECHANISM_SCRAM_SHA_256) {
+                if (flex_handshake)
+                    putKafkaCompactString(buf, "SCRAM-SHA-256", -1);
+                else
+                    ism_kafka_putString(buf, "SCRAM-SHA-256", -1);
+            }
+            if (flex_handshake)
+                putKafkaTagBuf(buf);                              /* request body tagged-fields */
             transport->send(transport, buf->buf+4, buf->used-4, 0, SFLAG_FRAMESPACE);
-            TRACE(7, "Send SaslHandshake: connect=%u name=%s\n", transport->index, transport->name);
+            TRACE(7, "Send SaslHandshake: connect=%u name=%s ver=%u\n", transport->index, transport->name, handshake_ver);
         }
     }
 }
