@@ -812,15 +812,24 @@ static int kafkaMetadataConnected(ism_transport_t * transport, int rc) {
                 transport->client_host ? transport->client_host : "");
         transport->ready = 10;
         transport->state = ISM_TRANST_Open;
-        /* Use MetadataRequest v4 for Kafka 4.x (kafka_api_version=3); v0 otherwise */
+        /*
+         * Kafka 4.x dropped MetadataRequest v0-v8; v9 (flexible encoding) is the minimum.
+         * Use v9 for kafka_api_version>=3, v4 for older Kafka 2.4+ (non-flexible), v0 legacy.
+         */
         if (kafka_api_version >= 3) {
             ism_kafka_putInt2(buf, MetadataRequest);     /* API key 3 */
-            ism_kafka_putInt2(buf, 4);                   /* version 4 */
+            ism_kafka_putInt2(buf, 9);                   /* version 9 (flexible) */
             ism_kafka_putInt4(buf, 0x10000);             /* Correlation ID */
-            ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
-            ism_kafka_putInt4(buf, 1);
-            ism_kafka_putString(buf, kafka_metering_topic, -1);
+            ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1); /* compact clientId */
+            ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
+            ism_kafka_putInt1(buf, 0);                   /* request header tagged-fields */
+            ism_kafka_putVarInt(buf, 2);                 /* compact-array: 1 topic */
+            ism_kafka_putVarInt(buf, (int32_t)strlen(kafka_metering_topic) + 1); /* topic name compact-string */
+            ism_common_allocBufferCopyLen(buf, kafka_metering_topic, (int)strlen(kafka_metering_topic));
+            ism_kafka_putInt1(buf, 0);                   /* per-topic tagged-fields */
             ism_kafka_putInt1(buf, 0);                   /* allow_auto_topic_creation=false */
+            ism_kafka_putInt1(buf, 0);                   /* include_topic_authorized_operations=false */
+            ism_kafka_putInt1(buf, 0);                   /* request body tagged-fields */
         } else {
             ism_kafka_putInt4(buf, MetadataRequest0);
             ism_kafka_putInt4(buf, 0x10000);             /* Correlation ID */
@@ -849,12 +858,18 @@ static int kafkaIMMessagingMetadataRequest(ism_transport_t * transport) {
 			transport->client_host ? transport->client_host : "");
 	if (kafka_api_version >= 3) {
 	    ism_kafka_putInt2(buf, MetadataRequest);
-	    ism_kafka_putInt2(buf, 4);
+	    ism_kafka_putInt2(buf, 9);                   /* version 9 (flexible) */
 	    ism_kafka_putInt4(buf, 0x20000);
-	    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
-	    ism_kafka_putInt4(buf, 1);
-	    ism_kafka_putString(buf, transport->pobj->topic, -1);
-	    ism_kafka_putInt1(buf, 0);   /* allow_auto_topic_creation=false */
+	    ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1);
+	    ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
+	    ism_kafka_putInt1(buf, 0);                   /* request header tagged-fields */
+	    ism_kafka_putVarInt(buf, 2);                 /* compact-array: 1 topic */
+	    ism_kafka_putVarInt(buf, (int32_t)strlen(transport->pobj->topic) + 1); /* topic name compact-string */
+	    ism_common_allocBufferCopyLen(buf, transport->pobj->topic, (int)strlen(transport->pobj->topic));
+	    ism_kafka_putInt1(buf, 0);                   /* per-topic tagged-fields */
+	    ism_kafka_putInt1(buf, 0);                   /* allow_auto_topic_creation=false */
+	    ism_kafka_putInt1(buf, 0);                   /* include_topic_authorized_operations=false */
+	    ism_kafka_putInt1(buf, 0);                   /* request body tagged-fields */
 	} else {
 	    ism_kafka_putInt4(buf, MetadataRequest0);
 	    ism_kafka_putInt4(buf, 0x20000);
@@ -889,12 +904,18 @@ static int kafkaIMMessagingMetadataConnected(ism_transport_t * transport, int rc
         pthread_spin_unlock(&topicRecord->lock);
         if (kafka_api_version >= 3) {
             ism_kafka_putInt2(buf, MetadataRequest);
-            ism_kafka_putInt2(buf, 4);
+            ism_kafka_putInt2(buf, 9);                   /* version 9 (flexible) */
             ism_kafka_putInt4(buf, 0x20000);
-            ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
-            ism_kafka_putInt4(buf, 1);
-            ism_kafka_putString(buf, transport->pobj->topic, -1);
-            ism_kafka_putInt1(buf, 0);   /* allow_auto_topic_creation=false */
+            ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1);
+            ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
+            ism_kafka_putInt1(buf, 0);                   /* request header tagged-fields */
+            ism_kafka_putVarInt(buf, 2);                 /* compact-array: 1 topic */
+            ism_kafka_putVarInt(buf, (int32_t)strlen(transport->pobj->topic) + 1);
+            ism_common_allocBufferCopyLen(buf, transport->pobj->topic, (int)strlen(transport->pobj->topic));
+            ism_kafka_putInt1(buf, 0);                   /* per-topic tagged-fields */
+            ism_kafka_putInt1(buf, 0);                   /* allow_auto_topic_creation=false */
+            ism_kafka_putInt1(buf, 0);                   /* include_topic_authorized_operations=false */
+            ism_kafka_putInt1(buf, 0);                   /* request body tagged-fields */
         } else {
             ism_kafka_putInt4(buf, MetadataRequest0);
             ism_kafka_putInt4(buf, 0x20000);
@@ -1076,7 +1097,20 @@ static int receiveKafka(ism_transport_t * transport, char * inbuf, int buflen, i
 
     int  corrid = ism_kafka_getInt4(buf);
     if (corrid == 0x10000) {             /* Metadata */
-        int broker_cnt = ism_kafka_getInt4(buf);
+        /*
+         * MetadataResponse v9+ uses flexible encoding (compact arrays/strings).
+         * Detect from kafka_api_version (set to 3 for Kafka 4.x).
+         */
+        int flex = (kafka_api_version >= 3);
+        if (flex)
+            ism_kafka_getInt4(buf);          /* throttle_time_ms (INT32) in v9 flex response */
+        int broker_cnt;
+        if (flex) {
+            int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} broker_cnt=(enc>0)?(enc-1):0;
+        } else {
+            broker_cnt = ism_kafka_getInt4(buf);
+        }
+        if (broker_cnt < 0) broker_cnt = 0;
         pthread_mutex_lock(&kafka_lock);
         if (!kafka_needmetadata) {
             TRACE(3, "kafka metadata already processed\n");
@@ -1093,8 +1127,23 @@ static int receiveKafka(ism_transport_t * transport, char * inbuf, int buflen, i
         for (i=0; i<broker_cnt; i++) {
             char * hoststr;
             int nodeid  = ism_kafka_getInt4(buf);
-            int hostlen = ism_kafka_getString(buf, &hoststr);
+            int hostlen;
+            if (flex) {
+                int enc = 0, sh = 0;
+                while (ism_kafka_more(buf) >= 0 && sh < 28) { uint8_t b=(uint8_t)buf->buf[buf->pos++]; enc|=((int)(b&0x7f))<<sh; if(!(b&0x80))break; sh+=7; }
+                hostlen = (enc > 0) ? (enc - 1) : 0;
+                hoststr = buf->buf + buf->pos;
+                buf->pos += hostlen;
+            } else {
+                hostlen = ism_kafka_getString(buf, &hoststr);
+            }
             int port    = ism_kafka_getInt4(buf);
+            if (flex) {
+                /* rack: compact nullable string — read varint length then skip bytes */
+                int renc=0,rsh=0; while(ism_kafka_more(buf)>=0&&rsh<28){uint8_t rb=(uint8_t)buf->buf[buf->pos++];renc|=((int)(rb&0x7f))<<rsh;if(!(rb&0x80))break;rsh+=7;}
+                if (renc > 1) buf->pos += (renc - 1);   /* skip rack bytes (len = renc-1) */
+                buf->pos++;  /* per-broker tagged-fields (empty = 0x00) */
+            }
             if (ism_kafka_more(buf)<0 || hostlen==0 || port < 1 || port > 65535) {
                 TRACE(5, "Kafka metadata incomplete parsing broker\n");
                 rc = 1;
@@ -1103,12 +1152,28 @@ static int receiveKafka(ism_transport_t * transport, char * inbuf, int buflen, i
                 TRACE(7, "Kafka metadata for broker slot=%u node=%u %s:%u\n", slot, nodeid, hoststr, port);
             }
         }
-        buf->pos += 4;    /* Assume 1 topic */
+        if (flex) {
+            /* cluster_id: compact nullable string — read varint length then skip bytes */
+            int cenc=0,csh=0; while(ism_kafka_more(buf)>=0&&csh<28){uint8_t cb=(uint8_t)buf->buf[buf->pos++];cenc|=((int)(cb&0x7f))<<csh;if(!(cb&0x80))break;csh+=7;}
+            if (cenc > 1) buf->pos += (cenc - 1);
+            ism_kafka_getInt4(buf);   /* controller_id */
+        }
+        /* topic array count — we only care about 1 topic, skip the count field */
+        if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} (void)enc; }
+        else buf->pos += 4;
         if (rc == 0) {
             char * topicstr;
             int topicrc = ism_kafka_getInt2(buf);
-            int topiclen = ism_kafka_getString(buf, &topicstr);
-            int part_cnt = ism_kafka_getInt4(buf);
+            int topiclen;
+            if (flex) {
+                int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} topiclen=(enc>0)?(enc-1):0; topicstr=buf->buf+buf->pos; buf->pos+=topiclen;
+            } else {
+                topiclen = ism_kafka_getString(buf, &topicstr);
+            }
+            int part_cnt;
+            if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} part_cnt=(enc>0)?(enc-1):0; }
+            else part_cnt = ism_kafka_getInt4(buf);
+            if (part_cnt < 0) part_cnt = 0;
             TRACE(7, "Kafka metadata: topic=%s rc=%d part_count=%d\n", topicstr?topicstr:"", topicrc, part_cnt);
             if (ism_kafka_more(buf)<0 || part_cnt >= 0x1000000 || topiclen < 1 || topicrc != 0) {
                  TRACE(5, "Kafka metadata incomplete while parsing topic. parts=%u topiclen=%u rc=%d\n", part_cnt, topiclen, topicrc);
@@ -1119,10 +1184,16 @@ static int receiveKafka(ism_transport_t * transport, char * inbuf, int buflen, i
                     int partrc =  ism_kafka_getInt2(buf);
                     int partid =  ism_kafka_getInt4(buf);
                     int leader =  ism_kafka_getInt4(buf);
-                    int replica = ism_kafka_getInt4(buf) & 0xffff;
+                    int replica;
+                    if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} replica=(enc>0)?(enc-1):0; }
+                    else replica = ism_kafka_getInt4(buf) & 0xffff;
+                    if (replica < 0) replica = 0;
                     buf->pos += 4 * replica;   /* Skip over replica info */
-                    isr =         ism_kafka_getInt4(buf) & 0xffff;
+                    if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} isr=(enc>0)?(enc-1):0; }
+                    else isr = ism_kafka_getInt4(buf) & 0xffff;
+                    if (isr < 0) isr = 0;
                     buf->pos += 4 * isr;       /* Skip over isr info */
+                    if (flex) buf->pos++;       /* per-partition tagged-fields */
                     if (ism_kafka_more(buf)<0) {
                          TRACE(5, "Kafka metadata incomplete while parsing partition info\n");
                     } else {
@@ -2398,23 +2469,36 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
      *   Isr => [int32]
      */
     if (corrid == 0x20000) {             /* Metadata */
-        int broker_cnt = ism_kafka_getInt4(buf);
+        int flex = (kafka_api_version >= 3);
+        if (flex) ism_kafka_getInt4(buf);     /* throttle_time_ms */
+        int broker_cnt;
+        if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} broker_cnt=(enc>0)?(enc-1):0; }
+        else broker_cnt = ism_kafka_getInt4(buf);
+        if (broker_cnt < 0) broker_cnt = 0;
         pthread_mutex_lock(&kafka_im_lock);
 
         pthread_spin_lock(&transport->pobj->server->lock);
-		for (i=0; i<32; i++) {
-			transport->pobj->server->node[i] = -1;
-			replaceString(&transport->pobj->server->nodeaddr[i], NULL);
-		}
-		pthread_spin_unlock(&transport->pobj->server->lock);
+  for (i=0; i<32; i++) {
+   transport->pobj->server->node[i] = -1;
+   replaceString(&transport->pobj->server->nodeaddr[i], NULL);
+  }
+  pthread_spin_unlock(&transport->pobj->server->lock);
 
-		brokers = ism_common_calloc(ISM_MEM_PROBE(ism_memory_proxy_kafka,5),broker_cnt , sizeof(kafka_broker_t));
+  brokers = ism_common_calloc(ISM_MEM_PROBE(ism_memory_proxy_kafka,5),broker_cnt , sizeof(kafka_broker_t));
 
-		for (i=0; i<broker_cnt; i++) {
+  for (i=0; i<broker_cnt; i++) {
             char * hoststr;
             int nodeid  = ism_kafka_getInt4(buf);
-            int hostlen = ism_kafka_getString(buf, &hoststr);
+            int hostlen;
+            if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} hostlen=(enc>0)?(enc-1):0; hoststr=buf->buf+buf->pos; buf->pos+=hostlen; }
+            else hostlen = ism_kafka_getString(buf, &hoststr);
             int port    = ism_kafka_getInt4(buf);
+            if (flex) {
+                /* rack: compact nullable string — read varint length then skip bytes */
+                int renc=0,rsh=0; while(ism_kafka_more(buf)>=0&&rsh<28){uint8_t rb=(uint8_t)buf->buf[buf->pos++];renc|=((int)(rb&0x7f))<<rsh;if(!(rb&0x80))break;rsh+=7;}
+                if (renc > 1) buf->pos += (renc - 1);
+                buf->pos++;  /* per-broker tagged-fields (empty = 0x00) */
+            }
 
             brokers[i].nodeid = nodeid;
             brokers[i].hostlen = hostlen;
@@ -2434,11 +2518,23 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
         }
 
 
-        buf->pos += 4;    /* Assume 1 topic */
+        if (flex) {
+            /* cluster_id: compact nullable string — read varint length then skip bytes */
+            int cenc=0,csh=0; while(ism_kafka_more(buf)>=0&&csh<28){uint8_t cb=(uint8_t)buf->buf[buf->pos++];cenc|=((int)(cb&0x7f))<<csh;if(!(cb&0x80))break;csh+=7;}
+            if (cenc > 1) buf->pos += (cenc - 1);
+            ism_kafka_getInt4(buf);   /* controller_id */
+        }
+        if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} (void)enc; }
+        else buf->pos += 4;    /* Assume 1 topic */
         if (rc == 0) {
             int topicrc = ism_kafka_getInt2(buf);
-            int topiclen = ism_kafka_getString(buf, &topicstr);
-            int part_cnt = ism_kafka_getInt4(buf);
+            int topiclen;
+            if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} topiclen=(enc>0)?(enc-1):0; topicstr=buf->buf+buf->pos; buf->pos+=topiclen; }
+            else topiclen = ism_kafka_getString(buf, &topicstr);
+            int part_cnt;
+            if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} part_cnt=(enc>0)?(enc-1):0; }
+            else part_cnt = ism_kafka_getInt4(buf);
+            if (part_cnt < 0) part_cnt = 0;
             TRACE(5, "Kafka im messaging metadata: topic=%s rc=%d part_count=%d\n", topicstr?topicstr:"", topicrc, part_cnt);
             if (ism_kafka_more(buf)<0 || part_cnt >= 0x1000000 || topiclen < 1 || topicrc != 0) {
                  TRACE(5, "Kafka im messaging metadata incomplete while parsing topic. parts=%u topiclen=%u rc=%d\n", part_cnt, topiclen, topicrc);
@@ -2451,10 +2547,16 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
                     int partrc =  ism_kafka_getInt2(buf);
                     int partid =  ism_kafka_getInt4(buf);
                     int leader =  ism_kafka_getInt4(buf);
-                    int replica = ism_kafka_getInt4(buf) & 0xffff;
+                    int replica;
+                    if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} replica=(enc>0)?(enc-1):0; }
+                    else replica = ism_kafka_getInt4(buf) & 0xffff;
+                    if (replica < 0) replica = 0;
                     buf->pos += 4 * replica;   /* Skip over replica info */
-                    isr =         ism_kafka_getInt4(buf) & 0xffff;
+                    if (flex) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} isr=(enc>0)?(enc-1):0; }
+                    else isr = ism_kafka_getInt4(buf) & 0xffff;
+                    if (isr < 0) isr = 0;
                     buf->pos += 4 * isr;       /* Skip over isr info */
+                    if (flex) buf->pos++;       /* per-partition tagged-fields */
                     if (ism_kafka_more(buf)<0) {
                          TRACE(5, "Kafka metadata incomplete while parsing partition info\n");
                     } else {
@@ -2535,6 +2637,12 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
      * ThrottleTime => int32
      */
     else  if (corrid == 1) {
+        /*
+         * ProduceResponse v9+ (flexible): compact-array topic count, compact-string topic name,
+         * compact-array partition count, per-partition tagged-fields, per-topic tagged-fields,
+         * throttle_time_ms, response body tagged-fields.
+         */
+        int flex_prod = (kafka_produce_version >= 9);
         int topiclen = 0;;
         int partid = 0;;
         int res_rc = 0;
@@ -2547,15 +2655,20 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
         char * topic = NULL;
         ism_time_t currTimeInNanos = ism_common_currentTimeNanos();
 
-        int response_cnt = ism_kafka_getInt4(buf);
+        int response_cnt;
+        if (flex_prod) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} response_cnt=(enc>0)?(enc-1):0; }
+        else response_cnt = ism_kafka_getInt4(buf);
         for(i=0; i< response_cnt; i++){
             found=0;
             int pcount=0;
             int connectionCount=0;
             int kafka_shutdown_onerror_time=0;
             ismArray_t partitionConnections;
-            topiclen 	= ism_kafka_getString(buf, &topicstr);
-            int part_cnt = ism_kafka_getInt4(buf);  //Get Partition Count
+            if (flex_prod) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} topiclen=(enc>0)?(enc-1):0; topicstr=buf->buf+buf->pos; buf->pos+=topiclen; }
+            else topiclen = ism_kafka_getString(buf, &topicstr);
+            int part_cnt;
+            if (flex_prod) { int enc=0,sh=0; while(ism_kafka_more(buf)>=0&&sh<28){uint8_t b=(uint8_t)buf->buf[buf->pos++];enc|=((int)(b&0x7f))<<sh;if(!(b&0x80))break;sh+=7;} part_cnt=(enc>0)?(enc-1):0; }
+            else part_cnt = ism_kafka_getInt4(buf);  //Get Partition Count
             kafkaTopicRecord_t * topicRecord = ism_kafka_getTopicRecord(topicstr);
 
             pthread_spin_lock(&topicRecord->lock);
@@ -2573,6 +2686,10 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
                 offset 		= ism_kafka_getInt8(buf);
                 if (kafka_produce_version >= 2) {
                     timestamp = ism_kafka_getInt8(buf);
+                }
+                if (flex_prod) {
+                    ism_kafka_getInt4(buf);   /* log_start_offset (v5+) */
+                    buf->pos++;               /* per-partition tagged-fields */
                 }
                 produce_rc = res_rc;
                 TRACE(6, "KafkaProduceResponse: topiclen=%d topic=%s partid=%d rc=%d offset=%ld\n", topiclen, topicstr, partid, res_rc, offset);
@@ -2708,7 +2825,8 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
                 ism_common_setTimerOnce(ISM_TIMER_HIGH, requestMetadataKafkaIMMessagingTimer, kafkaTopic,  1000000000L);
             }
 
-
+            /* per-topic tagged-fields (flexible): one per topic entry, inside the topic loop */
+            if (flex_prod) buf->pos++;
         }
 
         if (kafka_produce_version >= 1) {
@@ -2716,6 +2834,7 @@ static int receiveKafkaMessage(ism_transport_t * transport, char * inbuf, int bu
             if (throttle_time != 0)
                 TRACE(6, "KafkaProduceResponse: throttle=%u\n", (uint32_t)throttle_time);
         }
+        if (flex_prod) buf->pos++;  /* response body tagged-fields */
     } else {
         TRACE(5, "receiveKafkaMessage: Unknown Correlation ID=%d\n", corrid);
     }

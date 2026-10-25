@@ -3964,8 +3964,8 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
     if (corrid == 0x20000) {             /* Metadata */
         int flex_meta = (mhub->verMetadata >= KAFKA_METADATA_FLEXIBLE_VERSION);
 
-        /* throttle_time_ms is present in v3+ responses (INT32, non-flexible) */
-        if (mhub->verMetadata >= 3 && !flex_meta)
+        /* throttle_time_ms: INT32 present as first field in MetadataResponse v3+ (all encodings) */
+        if (mhub->verMetadata >= 3)
             ism_kafka_getInt4(buf);   /* throttle_time_ms */
 
         int broker_cnt;
@@ -3984,7 +3984,8 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                 brokers[i].broker_len = ism_kafka_getString(buf, (char * *)&brokers[i].broker);
             brokers[i].port = (uint16_t) ism_kafka_getInt4(buf);
             if (flex_meta) {
-                ism_kafka_getInt4(buf);   /* rack (nullable compact string length varint); skip */
+                char * rack_ignored;
+                getKafkaCompactString(buf, &rack_ignored);  /* rack: compact nullable string */
                 skipKafkaTagBuf(buf);     /* per-broker tagged-fields */
             }
             TRACE(8, "MessageHub broker metadata: arrayindex=%d nodeid=%d broker=%s port=%d\n",
@@ -3993,8 +3994,9 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
 
         /* cluster_id (nullable compact string) and controller_id (INT32) in v2+ flexible */
         if (flex_meta) {
-            skipKafkaTagBuf(buf);         /* cluster_id compact-string (skip varint + bytes) */
-            ism_kafka_getInt4(buf);       /* controller_id */
+            char * cid_ignored;
+            getKafkaCompactString(buf, &cid_ignored);   /* cluster_id: compact nullable string */
+            ism_kafka_getInt4(buf);                     /* controller_id */
         }
 
         int topic_count;
