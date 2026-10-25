@@ -3748,7 +3748,7 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
             }
 
             if(rc != 0 ||  (mhub->sasl_mechanism == SASL_MECHANISM_PLAIN)){
-                //If it is SASL PLain. This is the last reponse from the server.
+                //If it is SASL PLain. This is the last response from the server.
                 break;
             }
 
@@ -3760,7 +3760,22 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
                if (context->state == SASL_SCRAM_STATE_CLIENT_FIRST_MESSAGE){
                    //HANDLE: Server First Message
                     char * receivedSASLBytes;
-                   int len = ism_kafka_getBytes(buf, &receivedSASLBytes );
+                   /* auth_bytes field: compact-bytes (varint len+1) for v2+, legacy INT32 BYTES otherwise */
+                   int len;
+                   if (flex_auth) {
+                       int encoded = 0, shift = 0;
+                       while (ism_kafka_more(buf) >= 0 && shift < 28) {
+                           uint8_t b = (uint8_t)buf->buf[buf->pos++];
+                           encoded |= ((int)(b & 0x7f)) << shift;
+                           if (!(b & 0x80)) break;
+                           shift += 7;
+                       }
+                       len = (encoded > 0) ? (encoded - 1) : 0;
+                       receivedSASLBytes = buf->buf + buf->pos;
+                       buf->pos += len;
+                   } else {
+                       len = ism_kafka_getBytes(buf, &receivedSASLBytes);
+                   }
                    char * receivedStr = alloca(len+1);
                    memcpy(receivedStr, receivedSASLBytes, len);
                    receivedStr[len]=0;
@@ -3779,7 +3794,22 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
                } else if(context->state == SASL_SCRAM_STATE_CLIENT_FINAL_MESSAGE){
                     //HANDLE: Server Final Message.
                     char * receivedSASLBytes;
-                    int len = ism_kafka_getBytes(buf, &receivedSASLBytes );
+                    /* auth_bytes field: compact-bytes (varint len+1) for v2+, legacy INT32 BYTES otherwise */
+                    int len;
+                    if (flex_auth) {
+                        int encoded = 0, shift = 0;
+                        while (ism_kafka_more(buf) >= 0 && shift < 28) {
+                            uint8_t b = (uint8_t)buf->buf[buf->pos++];
+                            encoded |= ((int)(b & 0x7f)) << shift;
+                            if (!(b & 0x80)) break;
+                            shift += 7;
+                        }
+                        len = (encoded > 0) ? (encoded - 1) : 0;
+                        receivedSASLBytes = buf->buf + buf->pos;
+                        buf->pos += len;
+                    } else {
+                        len = ism_kafka_getBytes(buf, &receivedSASLBytes);
+                    }
                     char * receivedStr = alloca(len+1);
                     memcpy(receivedStr, receivedSASLBytes, len);
                     receivedStr[len]=0;
@@ -4431,10 +4461,12 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                 if (sasl_auth_ver >= 2) {
                     putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                     putKafkaTagBuf(buf);          /* request header tagged-fields */
+                    /* compact-bytes: varint(len+1) — flexible SaslAuthenticateRequest v2 */
+                    ism_kafka_putVarInt(buf, (2 + userlen + passwordlen) + 1);
                 } else {
                     ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
+                    ism_kafka_putInt4(buf, 2 + userlen + passwordlen);            /* legacy BYTES */
                 }
-                ism_kafka_putInt4(buf, 2 + userlen + passwordlen);
             }
             ism_kafka_putInt1(buf, 0);
             if (userlen)
@@ -4468,10 +4500,11 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                     if (sasl_auth_ver >= 2) {
                         putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                         putKafkaTagBuf(buf);      /* request header tagged-fields */
+                        ism_kafka_putVarInt(buf, first_msg_buf.used + 1);             /* compact-bytes */
                     } else {
                         ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
+                        ism_kafka_putInt4(buf, first_msg_buf.used);                   /* legacy BYTES */
                     }
-                    ism_kafka_putInt4(buf, first_msg_buf.used); //body length
                 }
                 char * first_message = alloca(first_msg_buf.used+1);
                 memcpy(first_message, first_msg_buf.buf, first_msg_buf.used);
@@ -4512,10 +4545,11 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                    if (sasl_auth_ver >= 2) {
                        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                        putKafkaTagBuf(buf);       /* request header tagged-fields */
+                       ism_kafka_putVarInt(buf, client_final_message_outbuf.used + 1); /* compact-bytes */
                    } else {
-                       ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
+                       ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);     /* INT16 clientId */
+                       ism_kafka_putInt4(buf, client_final_message_outbuf.used);       /* legacy BYTES */
                    }
-                   ism_kafka_putInt4(buf, client_final_message_outbuf.used); //body length
                }
 
                 ism_common_allocBufferCopyLen(buf, client_final_message_outbuf.buf, client_final_message_outbuf.used );
