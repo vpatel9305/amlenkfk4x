@@ -111,12 +111,12 @@ static const char * mhubStateString(int state) {
  */
 static void putKafkaCompactString(concat_alloc_t * buf, const char * value, int len) {
     if (!value) {
-        ism_kafka_putVarInt(buf, 0);
+        ism_kafka_putUVarInt(buf, 0);
         return;
     }
     if (len < 0)
         len = (int)strlen(value);
-    ism_kafka_putVarInt(buf, len + 1);
+    ism_kafka_putUVarInt(buf, (uint32_t)(len + 1));
     ism_common_allocBufferCopyLen(buf, value, len);
 }
 
@@ -170,7 +170,7 @@ static int getKafkaCompactArrayLen(concat_alloc_t * buf) {
  * Write a compact array length (unsigned varint, value = count+1).
  */
 static void putKafkaCompactArrayLen(concat_alloc_t * buf, int count) {
-    ism_kafka_putVarInt(buf, count + 1);
+    ism_kafka_putUVarInt(buf, (uint32_t)(count + 1));
 }
 
 /*
@@ -201,6 +201,7 @@ static void skipKafkaTagBuf(concat_alloc_t * buf) {
  */
 extern void ism_protocol_ensureBuffer(ism_actionbuf_t * buf, int len);
 extern void ism_kafka_putVarInt(concat_alloc_t * buf, int32_t ilen) ;
+extern void ism_kafka_putUVarInt(concat_alloc_t * buf, uint32_t uval) ;
 char * ism_mhub_toString(ism_mhub_t * mhub);
 static int compareRule(mhub_rule_t * rule1, mhub_rule_t * rule2);
 static int mhubStateCheck(ism_timer_t key, ism_time_t now, void * userdata);
@@ -4464,7 +4465,7 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                     putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                     putKafkaTagBuf(buf);          /* request header tagged-fields */
                     /* compact-bytes: varint(len+1) — flexible SaslAuthenticateRequest v2 */
-                    ism_kafka_putVarInt(buf, (2 + userlen + passwordlen) + 1);
+                    ism_kafka_putUVarInt(buf, (uint32_t)(2 + userlen + passwordlen) + 1);
                 } else {
                     ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
                     ism_kafka_putInt4(buf, 2 + userlen + passwordlen);            /* legacy BYTES */
@@ -4502,7 +4503,7 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                     if (sasl_auth_ver >= 2) {
                         putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                         putKafkaTagBuf(buf);      /* request header tagged-fields */
-                        ism_kafka_putVarInt(buf, first_msg_buf.used + 1);             /* compact-bytes */
+                        ism_kafka_putUVarInt(buf, (uint32_t)first_msg_buf.used + 1);  /* compact-bytes */
                     } else {
                         ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
                         ism_kafka_putInt4(buf, first_msg_buf.used);                   /* legacy BYTES */
@@ -4547,7 +4548,7 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
                    if (sasl_auth_ver >= 2) {
                        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
                        putKafkaTagBuf(buf);       /* request header tagged-fields */
-                       ism_kafka_putVarInt(buf, client_final_message_outbuf.used + 1); /* compact-bytes */
+                       ism_kafka_putUVarInt(buf, (uint32_t)client_final_message_outbuf.used + 1); /* compact-bytes */
                    } else {
                        ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);     /* INT16 clientId */
                        ism_kafka_putInt4(buf, client_final_message_outbuf.used);       /* legacy BYTES */
@@ -5391,7 +5392,7 @@ int ism_mhub_message_produce(ism_transport_t * transport, ism_mhub_t * mhub, mhu
         putKafkaCompactString(buf, transport->name, -1);
         putKafkaTagBuf(buf);                           /* request header tagged-fields */
         /* transactional_id: null compact string (non-transactional producer) */
-        ism_kafka_putVarInt(buf, 0);
+        ism_kafka_putUVarInt(buf, 0);  /* transactional_id: null compact string */
     } else {
         ism_kafka_putString(buf, transport->name, -1);
         /* transactional_id (v3-v8): null legacy string */

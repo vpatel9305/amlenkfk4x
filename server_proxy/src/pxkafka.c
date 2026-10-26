@@ -70,6 +70,7 @@ extern ism_routing_config_t *       g_routeconfig;
 int ism_kafka_getAddress(ism_server_t * server, ism_transport_t * transport,  ism_gotAddress_f gotAddress);
 #endif
 void ism_kafka_putVarInt(concat_alloc_t * buf, int32_t len);
+void ism_kafka_putUVarInt(concat_alloc_t * buf, uint32_t uval);
 mqtt_prop_ctx_t * ism_proxy_getMqttContext(int version);
 
 #ifndef NO_PROXY
@@ -585,10 +586,10 @@ int ism_kafka_produceMetering(ism_transport_t * transport, kafka_meter_t * msgs)
     ism_kafka_putInt2(buf, kafka_produce_version);       /* api version */
     ism_kafka_putInt4(buf, 1);                           /* CorrID   */
     if (flex_produce) {
-        ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1);
+        ism_kafka_putUVarInt(buf, (uint32_t)strlen(ism_common_getHostnameInfo()) + 1);
         ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
         ism_kafka_putInt1(buf, 0);     /* request header tagged-fields */
-        ism_kafka_putVarInt(buf, 0);   /* transactional_id: null compact string */
+        ism_kafka_putUVarInt(buf, 0);  /* transactional_id: null compact string */
     } else {
         ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
         if (kafka_produce_version >= 3)
@@ -599,10 +600,10 @@ int ism_kafka_produceMetering(ism_transport_t * transport, kafka_meter_t * msgs)
     ism_kafka_putInt4(buf, 5000);                        /* timeout */
 
     if (flex_produce) {
-        ism_kafka_putVarInt(buf, 2);   /* compact-array: 1 topic (count+1) */
-        ism_kafka_putVarInt(buf, (int32_t)strlen(kafka_metering_topic) + 1);
+        ism_kafka_putUVarInt(buf, 2);  /* compact-array: 1 topic (count+1) */
+        ism_kafka_putUVarInt(buf, (uint32_t)strlen(kafka_metering_topic) + 1);
         ism_common_allocBufferCopyLen(buf, kafka_metering_topic, (int)strlen(kafka_metering_topic));
-        ism_kafka_putVarInt(buf, 2);   /* compact-array: 1 partition */
+        ism_kafka_putUVarInt(buf, 2);  /* compact-array: 1 partition */
     } else {
         ism_kafka_putInt4(buf, 1);                       /* topic count */
         ism_kafka_putString(buf, kafka_metering_topic, -1);
@@ -820,11 +821,11 @@ static int kafkaMetadataConnected(ism_transport_t * transport, int rc) {
             ism_kafka_putInt2(buf, MetadataRequest);     /* API key 3 */
             ism_kafka_putInt2(buf, 9);                   /* version 9 (flexible) */
             ism_kafka_putInt4(buf, 0x10000);             /* Correlation ID */
-            ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1); /* compact clientId */
+            ism_kafka_putUVarInt(buf, (uint32_t)strlen(ism_common_getHostnameInfo()) + 1); /* compact clientId */
             ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
             ism_kafka_putInt1(buf, 0);                   /* request header tagged-fields */
-            ism_kafka_putVarInt(buf, 2);                 /* compact-array: 1 topic */
-            ism_kafka_putVarInt(buf, (int32_t)strlen(kafka_metering_topic) + 1); /* topic name compact-string */
+            ism_kafka_putUVarInt(buf, 2);                /* compact-array: 1 topic */
+            ism_kafka_putUVarInt(buf, (uint32_t)strlen(kafka_metering_topic) + 1); /* topic name compact-string */
             ism_common_allocBufferCopyLen(buf, kafka_metering_topic, (int)strlen(kafka_metering_topic));
             ism_kafka_putInt1(buf, 0);                   /* per-topic tagged-fields */
             ism_kafka_putInt1(buf, 0);                   /* allow_auto_topic_creation=false */
@@ -860,11 +861,11 @@ static int kafkaIMMessagingMetadataRequest(ism_transport_t * transport) {
 	    ism_kafka_putInt2(buf, MetadataRequest);
 	    ism_kafka_putInt2(buf, 9);                   /* version 9 (flexible) */
 	    ism_kafka_putInt4(buf, 0x20000);
-	    ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1);
+	    ism_kafka_putUVarInt(buf, (uint32_t)strlen(ism_common_getHostnameInfo()) + 1);
 	    ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
 	    ism_kafka_putInt1(buf, 0);                   /* request header tagged-fields */
-	    ism_kafka_putVarInt(buf, 2);                 /* compact-array: 1 topic */
-	    ism_kafka_putVarInt(buf, (int32_t)strlen(transport->pobj->topic) + 1); /* topic name compact-string */
+	    ism_kafka_putUVarInt(buf, 2);                /* compact-array: 1 topic */
+	    ism_kafka_putUVarInt(buf, (uint32_t)strlen(transport->pobj->topic) + 1); /* topic name compact-string */
 	    ism_common_allocBufferCopyLen(buf, transport->pobj->topic, (int)strlen(transport->pobj->topic));
 	    ism_kafka_putInt1(buf, 0);                   /* per-topic tagged-fields */
 	    ism_kafka_putInt1(buf, 0);                   /* allow_auto_topic_creation=false */
@@ -906,11 +907,11 @@ static int kafkaIMMessagingMetadataConnected(ism_transport_t * transport, int rc
             ism_kafka_putInt2(buf, MetadataRequest);
             ism_kafka_putInt2(buf, 9);                   /* version 9 (flexible) */
             ism_kafka_putInt4(buf, 0x20000);
-            ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1);
+            ism_kafka_putUVarInt(buf, (uint32_t)strlen(ism_common_getHostnameInfo()) + 1);
             ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
             ism_kafka_putInt1(buf, 0);                   /* request header tagged-fields */
-            ism_kafka_putVarInt(buf, 2);                 /* compact-array: 1 topic */
-            ism_kafka_putVarInt(buf, (int32_t)strlen(transport->pobj->topic) + 1);
+            ism_kafka_putUVarInt(buf, 2);                /* compact-array: 1 topic */
+            ism_kafka_putUVarInt(buf, (uint32_t)strlen(transport->pobj->topic) + 1);
             ism_common_allocBufferCopyLen(buf, transport->pobj->topic, (int)strlen(transport->pobj->topic));
             ism_kafka_putInt1(buf, 0);                   /* per-topic tagged-fields */
             ism_kafka_putInt1(buf, 0);                   /* allow_auto_topic_creation=false */
@@ -3371,10 +3372,10 @@ int ism_kafka_message_produce(ism_transport_t * transport, kafkaConnectionRecord
     ism_kafka_putInt2(buf, kafka_produce_version);     /* version */
     ism_kafka_putInt4(buf, 1);                         /* CorrID  */
     if (flex_produce) {
-        ism_kafka_putVarInt(buf, (int32_t)strlen(ism_common_getHostnameInfo()) + 1);
+        ism_kafka_putUVarInt(buf, (uint32_t)strlen(ism_common_getHostnameInfo()) + 1);
         ism_common_allocBufferCopyLen(buf, ism_common_getHostnameInfo(), (int)strlen(ism_common_getHostnameInfo()));
         ism_kafka_putInt1(buf, 0);     /* request header tagged-fields */
-        ism_kafka_putVarInt(buf, 0);   /* transactional_id: null compact string */
+        ism_kafka_putUVarInt(buf, 0);  /* transactional_id: null compact string */
     } else {
         ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
         if (kafka_produce_version >= 3)
@@ -3392,10 +3393,10 @@ int ism_kafka_message_produce(ism_transport_t * transport, kafkaConnectionRecord
 
     /* topic_data array */
     if (flex_produce) {
-        ism_kafka_putVarInt(buf, 2);   /* compact-array: 1 topic (count+1) */
-        ism_kafka_putVarInt(buf, (int32_t)strlen(connRecord->topic) + 1);
+        ism_kafka_putUVarInt(buf, 2);  /* compact-array: 1 topic (count+1) */
+        ism_kafka_putUVarInt(buf, (uint32_t)strlen(connRecord->topic) + 1);
         ism_common_allocBufferCopyLen(buf, connRecord->topic, (int)strlen(connRecord->topic));
-        ism_kafka_putVarInt(buf, 2);   /* compact-array: 1 partition */
+        ism_kafka_putUVarInt(buf, 2);  /* compact-array: 1 partition */
     } else {
         ism_kafka_putInt4(buf, 1);        /* topic count */
         ism_kafka_putString(buf, connRecord->topic, -1);
@@ -4428,6 +4429,21 @@ void ism_kafka_putVarInt(concat_alloc_t * buf, int32_t ilen) {
         bputchar(buf, (char)((len>>21)|0x80));
         bputchar(buf, (char)(len>>28));
     }
+}
+
+/*
+ * Write an unsigned (non-zigzag) variable-length integer — plain LEB128.
+ * Used for Kafka compact-string lengths (N+1) and compact-array lengths (count+1).
+ * ism_kafka_putVarInt() uses zigzag encoding which is correct for signed
+ * RecordBatch fields (timestampDelta, offsetDelta, key/value lengths) but
+ * WRONG for compact-string/array lengths which are always unsigned.
+ */
+void ism_kafka_putUVarInt(concat_alloc_t * buf, uint32_t uval) {
+    while (uval > 127) {
+        bputchar(buf, (char)((uval & 0x7f) | 0x80));
+        uval >>= 7;
+    }
+    bputchar(buf, (char)uval);
 }
 
 /*
