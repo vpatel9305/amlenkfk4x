@@ -3714,11 +3714,11 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
          */
         case 0x30000: {
             int flex_hs = (mhub->verSaslHandshake >= 2);
-            rc = ism_kafka_getInt2(&obuf);
+            rc = ism_kafka_getInt2(buf);
             if (flex_hs)
-                skipKafkaTagBuf(&obuf);   /* response body tagged-fields */
+                skipKafkaTagBuf(buf);     /* response body tagged-fields */
             if (rc == 0) {
-                sendSASL(transport, &obuf, 2);
+                sendSASL(transport, buf, 2);
                 return 0;
             }
             break;
