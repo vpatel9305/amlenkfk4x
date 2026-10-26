@@ -4675,44 +4675,32 @@ static int ism_mhub_connected(ism_transport_t * transport, int rc) {
     mhub->retry = 0;
     transport->pobj->auth_require = 0;
 
-    if (mhub->versionKnown == 0) {
-        /*
-         * Send ApiVersionsRequest v0 with legacy request header v1.
-         *
-         * On a SASL_SSL listener Kafka 4.x enforces that all pre-SASL
-         * requests use request header v1 (legacy INT16 clientId string,
-         * no tagged-fields byte).  Sending the flexible v3 header
-         * (compact-string clientId + 0x00 tagged-fields) causes the broker's
-         * SaslServerAuthenticator to misparse the clientId length as a huge
-         * SASL token size and reject the connection with:
-         *   "Error reading byte array of N byte(s): only 17 byte(s) available"
-         *
-         * ApiVersionsRequest v0 with header v1 is accepted by all Kafka
-         * versions (0.10+) and the broker still returns the full list of
-         * supported API versions, which is all we need for negotiation.
-         *
-         * Format (request header v1 + ApiVersionsRequest v0 body):
-         *   apiKey(2) apiVersion(2) correlationId(4) clientId(INT16 string)
-         *   [no tagged-fields byte — that is a v2-header-only addition]
-         *   [empty body — ApiVersionsRequest v0 has no fields]
-         */
-        ism_kafka_putInt2(&buf, ApiVersionsRequest);         /* API key 18 */
-        ism_kafka_putInt2(&buf, 0);                          /* version 0 (legacy header v1) */
-        ism_kafka_putInt4(&buf, 0x30003);                    /* Correlation ID */
-        ism_kafka_putString(&buf, transport->name, -1);      /* clientId (INT16 string) */
-        /* no tagged-fields byte: request header v1 does not have one */
-        /* no body fields: ApiVersionsRequest v0 body is empty */
-        transport->send(transport, buf.buf+4, buf.used-4, 0, SFLAG_FRAMESPACE);
-        return 0;
-    } else {
-        if (mhub->mhubSASL) {
-            //DO: Determine wether SASL_PLAIN or SASL_SCRAME
-            sendSASL(transport, &buf, 1);
-
-        } else {
-            moreConnected(transport);
-        }
-    }
+    /*
+     * Always send ApiVersionsRequest v0 with legacy request header v1 on
+     * every new TCP connection, even when mhub->versionKnown is already set.
+     *
+     * Kafka 4.x (KIP-368) mandates ApiVersionsRequest as the first framed
+     * message on every new SASL_SSL connection before SaslHandshakeRequest.
+     * Skipping it on reconnects (metadata retries, partition connections)
+     * leaves the broker in raw-SASL-token mode and causes it to close the
+     * connection with TLS close_notify immediately after SaslAuthenticate,
+     * or reject it with:
+     *   "Error parsing request header. Our best guess of the apiKeyId is: 36"
+     *
+     * The ApiVersionsResponse handler (case 0x30003) calls sendSASL(kind=1)
+     * to proceed to SaslHandshakeRequest, preserving the full auth sequence:
+     *   ApiVersionsRequest -> ApiVersionsResponse
+     *   -> SaslHandshakeRequest -> SaslHandshakeResponse
+     *   -> SaslAuthenticate (SCRAM exchange)
+     *   -> MetadataRequest -> partitions open
+     */
+    ism_kafka_putInt2(&buf, ApiVersionsRequest);         /* API key 18 */
+    ism_kafka_putInt2(&buf, 0);                          /* version 0 (legacy header v1) */
+    ism_kafka_putInt4(&buf, 0x30003);                    /* Correlation ID */
+    ism_kafka_putString(&buf, transport->name, -1);      /* clientId (INT16 string) */
+    /* no tagged-fields byte: request header v1 does not have one */
+    /* no body fields: ApiVersionsRequest v0 body is empty */
+    transport->send(transport, buf.buf+4, buf.used-4, 0, SFLAG_FRAMESPACE);
     return 0;
 }
 
