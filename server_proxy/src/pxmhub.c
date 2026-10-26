@@ -3396,6 +3396,8 @@ static int processTopicMetadata(ism_mhub_t * mhub, const char * topicn, int topi
     memcpy(topicname, topicn, topiclen);
     topicname[topiclen] = 0;
     mhub_topic_t * topic = findTopic(mhub, topicname);
+    TRACE(5, "DBG processTopicMetadata: mhub=%s topic=%s topicrc=%d partcount=%d topic_found=%d\n",
+        mhub->id, topicname, topicrc, partcount, topic ? 1 : 0);
     TRACE(9, "Topic metadata: mhub=%s, topic=%s rc=%d partcount=%d\n", mhub->id, topicname, topicrc, partcount);
     if (topic) {
         if (topicrc == 0) {
@@ -3664,6 +3666,18 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
     char * reason;
     int rc = 0;
     int reasonlen;
+    TRACE(5, "DBG receiveSASL ENTER: connect=%u name=%s buflen=%d kind=%d auth_require=%d "
+             "versionKnown=%d verSaslHandshake=%d verSaslAuthenticate=%d mhubSASL=%d mechanism=%d\n",
+        transport->index, transport->name, buflen, kind,
+        transport->pobj->auth_require,
+        mhub->versionKnown, mhub->verSaslHandshake, mhub->verSaslAuthenticate,
+        mhub->mhubSASL, mhub->sasl_mechanism);
+    if (SHOULD_TRACEC(5, Kafka)) {
+        char trcbuf[64];
+        int maxsize = ism_common_getTraceMsgData() + 64;
+        sprintf(trcbuf, "DBG receiveSASL raw buf connect=%u", transport->index);
+        traceDataFunction(trcbuf, 0, __FILE__, __LINE__, inbuf, buflen, maxsize);
+    }
 
     /*
      * Handle SASL which comes in without any frame (legacy before Kafka 1.0)
@@ -3704,6 +3718,8 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
         char xbuf [2048];
         concat_alloc_t obuf = {xbuf, sizeof xbuf};
         int  corrid = ism_kafka_getInt4(buf);
+        TRACE(5, "DBG receiveSASL framed: connect=%u name=%s corrid=0x%08x buflen=%d\n",
+            transport->index, transport->name, corrid, buflen);
         switch (corrid) {
 
         /*
@@ -3715,12 +3731,20 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
         case 0x30000: {
             int flex_hs = (mhub->verSaslHandshake >= 2);
             rc = ism_kafka_getInt2(buf);
+            TRACE(5, "DBG SaslHandshakeResponse: connect=%u name=%s rc=%d flex_hs=%d "
+                     "verSaslHandshake=%d buf_remaining=%d\n",
+                transport->index, transport->name, rc, flex_hs,
+                mhub->verSaslHandshake, buflen - buf->pos);
             if (flex_hs)
                 skipKafkaTagBuf(buf);     /* response body tagged-fields */
             if (rc == 0) {
+                TRACE(5, "DBG SaslHandshakeResponse OK: connect=%u name=%s -> sending SaslAuthenticate (kind=2)\n",
+                    transport->index, transport->name);
                 sendSASL(transport, buf, 2);
                 return 0;
             }
+            TRACE(5, "DBG SaslHandshakeResponse ERROR: connect=%u name=%s rc=%d -> will close\n",
+                transport->index, transport->name, rc);
             break;
         }
 
@@ -3735,6 +3759,10 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
         case 0x30002: {
             int flex_auth = (mhub->verSaslAuthenticate != 0xff && mhub->verSaslAuthenticate >= 2);
             rc  = ism_kafka_getInt2(buf);
+            TRACE(5, "DBG SaslAuthenticateResponse: connect=%u name=%s rc=%d flex_auth=%d "
+                     "verSaslAuthenticate=%d mechanism=%d buf_remaining=%d\n",
+                transport->index, transport->name, rc, flex_auth,
+                mhub->verSaslAuthenticate, mhub->sasl_mechanism, buflen - buf->pos);
             if (flex_auth)
                 reasonlen = getKafkaCompactString(buf, &reason);
             else
@@ -3747,9 +3775,13 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
             } else {
                 reason = NULL;
             }
+            TRACE(5, "DBG SaslAuthenticateResponse reason: connect=%u name=%s reason=%s\n",
+                transport->index, transport->name, reason ? reason : "(none)");
 
             if(rc != 0 ||  (mhub->sasl_mechanism == SASL_MECHANISM_PLAIN)){
                 //If it is SASL PLain. This is the last response from the server.
+                TRACE(5, "DBG SaslAuthenticateResponse: connect=%u name=%s rc=%d mechanism=%d -> break (PLAIN or error)\n",
+                    transport->index, transport->name, rc, mhub->sasl_mechanism);
                 break;
             }
 
@@ -3758,6 +3790,8 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
 
                 ism_sasl_scram_context * context = transport->pobj->sals_scram_context;
 
+               TRACE(5, "DBG SCRAM SaslAuthenticateResponse: connect=%u name=%s scram_state=%d\n",
+                   transport->index, transport->name, context->state);
                if (context->state == SASL_SCRAM_STATE_CLIENT_FIRST_MESSAGE){
                    //HANDLE: Server First Message
                     char * receivedSASLBytes;
@@ -3781,12 +3815,24 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
                    memcpy(receivedStr, receivedSASLBytes, len);
                    receivedStr[len]=0;
 
+                   TRACE(5, "DBG SCRAM server-first-message: connect=%u name=%s len=%d msg=%s\n",
+                       transport->index, transport->name, len, receivedStr);
                    //Need server first message for later processing
                    ism_sasl_scram_server_set_first_message(context,receivedStr );
 
                    ism_prop_t * props = context->server_response_props;
                    ism_sasl_scram_parse_properties(receivedStr, props);
 
+                   const char * srvNonce = ism_common_getStringProperty(props, "r");
+                   const char * salt     = ism_common_getStringProperty(props, "s");
+                   int          iters    = ism_common_getIntProperty(props, "i", 0);
+                   TRACE(5, "DBG SCRAM server-first parsed: connect=%u name=%s serverNonce=%s salt=%s iterations=%d\n",
+                       transport->index, transport->name,
+                       srvNonce ? srvNonce : "(null)",
+                       salt     ? salt     : "(null)",
+                       iters);
+
+                   TRACE(5, "DBG SCRAM -> sending client-final (kind=2)\n");
                    sendSASL(transport, buf, 2);
 
                    //Need the server final message for SASL SCRAM. So just return.
@@ -3818,6 +3864,9 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
                     ism_sasl_scram_parse_properties(receivedStr, props);
 
                     const char * verification = ism_common_getStringProperty(props, "v");
+                    TRACE(5, "DBG SCRAM server-final-message: connect=%u name=%s len=%d msg=%s verification=%s\n",
+                        transport->index, transport->name, len, receivedStr,
+                        verification ? verification : "(null)");
                     if(verification!=NULL){
                         TRACE(7, "SASL SCRAM Response Received: verification=%s \n", verification);
                     }
@@ -3838,6 +3887,8 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
 
                     }else{
                         //SASL Authentication Succeed
+                        TRACE(5, "DBG SASL SCRAM Authentication SUCCEEDED: connect=%u name=%s\n",
+                            transport->index, transport->name);
                         TRACE(7, "SASL Authentication succeeded\n");
                         rc=0;
 
@@ -3859,10 +3910,21 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
          * ApiVersionsResponse
          */
         case 0x30003:
+            TRACE(5, "DBG ApiVersionsResponse: connect=%u name=%s buflen=%d -> calling receiveApiVersions\n",
+                transport->index, transport->name, buflen);
             receiveApiVersions(transport, buf);
+            TRACE(5, "DBG ApiVersionsResponse done: connect=%u name=%s versionKnown=%d mhubSASL=%d "
+                     "verSaslHandshake=%d verSaslAuthenticate=%d verProduce=%d verMetadata=%d\n",
+                transport->index, transport->name, mhub->versionKnown, mhub->mhubSASL,
+                mhub->verSaslHandshake, mhub->verSaslAuthenticate,
+                mhub->verProduce, mhub->verMetadata);
             if (mhub->mhubSASL) {
+                TRACE(5, "DBG ApiVersionsResponse: connect=%u name=%s -> sending SaslHandshake (kind=1)\n",
+                    transport->index, transport->name);
                 sendSASL(transport, &obuf, 1);
             } else {
+                TRACE(5, "DBG ApiVersionsResponse: connect=%u name=%s -> moreConnected (no SASL)\n",
+                    transport->index, transport->name);
                 moreConnected(transport);
             }
             return 0;
@@ -3870,8 +3932,10 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
     }
 
     if (reason && *reason) {
+        TRACE(5, "DBG receiveSASL EXIT: connect=%d name=%s rc=%d reason=%s\n", transport->index, transport->name, rc, reason);
         TRACE(7, "receiveSASL: connect=%d name=%s rc=%d reason=%s\n", transport->index, transport->name, rc, reason);
     } else {
+        TRACE(5, "DBG receiveSASL EXIT: connect=%d name=%s rc=%d\n", transport->index, transport->name, rc);
         TRACE(7, "receiveSASL: connect=%d name=%s rc=%d\n", transport->index, transport->name, rc);
     }
 
@@ -3932,15 +3996,24 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
     int  j;
     int rc = 0;
     transport->lastAccessTime = ism_common_readTSC();
+    TRACE(5, "DBG mhubReceiveMetadata ENTER: connect=%u name=%s buflen=%d kind=%d "
+             "auth_require=%d kafka_type=%d state=%d ready=%d\n",
+        transport->index, transport->name, buflen, kind,
+        transport->pobj->auth_require, transport->pobj->kafka_type,
+        transport->pobj->state, transport->ready);
     /*
      * Check if we are expecting a SASL response.  This does not come with a kafka header
      */
     if (transport->pobj->auth_require) {
+        TRACE(5, "DBG mhubReceiveMetadata: connect=%u auth_require=%d -> dispatching to receiveSASL\n",
+            transport->index, transport->pobj->auth_require);
         return receiveSASL(transport, inbuf, buflen, kind);
     }
 
     /* Get the correlation ID */
     int  corrid = ism_kafka_getInt4(buf);
+    TRACE(5, "DBG mhubReceiveMetadata: connect=%u name=%s corrid=0x%08x buflen=%d\n",
+        transport->index, transport->name, corrid, buflen);
 
     /*
      * Check for SASL responses
@@ -4007,6 +4080,8 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
             topic_count = ism_kafka_getInt4(buf);
         if (topic_count < 0) topic_count = 0;
 
+        TRACE(5, "DBG MetadataResponse: connect=%u name=%s broker_cnt=%d topic_count=%d flex_meta=%d\n",
+            transport->index, transport->name, broker_cnt, topic_count, flex_meta);
         for (i=0; rc==0 && i<topic_count; i++) {
             char * topicstr;
             int topicrc = ism_kafka_getInt2(buf);
@@ -4027,6 +4102,8 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                 rc = 2;
             } else {
                 rc = processTopicMetadata(mhub, topicstr, topiclen, topicrc, part_cnt);
+                TRACE(5, "DBG MetadataResponse topic[%d]: topicrc=%d topiclen=%d part_cnt=%d processrc=%d\n",
+                    i, topicrc, topiclen, part_cnt, rc);
                 for (j=0; rc==0 && j<part_cnt; j++) {
                     int isr;
                     int partrc =  ism_kafka_getInt2(buf);
@@ -4083,9 +4160,13 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
             mhub->stateChanged(mhub);       /* Notify of state change */
         }
         pthread_spin_unlock(&mhub->lock);
+        TRACE(5, "DBG MetadataResponse COMPLETE: connect=%u name=%s rc=0 mhub->state=%d "
+                 "topiccount=%d open=%d notopen=%d\n",
+            transport->index, transport->name, mhub->state,
+            mhub->topiccount, mhub->open, mhub->notopen);
         LOG(INFO, Server, 984, "%u%s%s%u%s",  "Mhub Metadata processing is completed: connect={0} name={1} server_addr={2} server_port={3} broker={4}",
         		transport->index, transport->name, transport->server_addr, transport->serverport,
-				(mhub->trybroker>0)?mhub->brokers[mhub->trybroker-1]:mhub->brokers[0]);
+   (mhub->trybroker>0)?mhub->brokers[mhub->trybroker-1]:mhub->brokers[0]);
     }
     return 0;
 }
@@ -4398,11 +4479,19 @@ static int moreConnected(ism_transport_t * transport) {
     transport->ready = 1;
     transport->pobj->auth_require = 0;
     transport->lastAccessTime = ism_common_readTSC();
+    TRACE(5, "DBG moreConnected ENTER: connect=%u name=%s kafka_type=%d topic=%s partID=%d nodeID=%d "
+             "mhub->open=%d mhub->notopen=%d mhub->topiccount=%d\n",
+        transport->index, transport->name, transport->pobj->kafka_type,
+        transport->pobj->topic ? transport->pobj->topic : "(none)",
+        transport->pobj->partID, transport->pobj->nodeID,
+        mhub->open, mhub->notopen, mhub->topiccount);
     TRACE(5, "Event Streams connection successful: connect=%u, name=%s\n", transport->index, transport->name);
     if (mhub->moreLogs)
         LOG(INFO, Server, 977, "%s%s%s" "Event Streams connection started: Name={0} ID={2} Broker={1}",
             transport->name, mhub->name, transport->client_host ? transport->client_host : transport->server_addr, mhub->name);
     if (transport->pobj->kafka_type == KafkaMetadata) {
+        TRACE(5, "DBG moreConnected: connect=%u name=%s -> MetadataRequest (topiccount=%d)\n",
+            transport->index, transport->name, mhub->topiccount);
         mhub->expectingMetadata = 1;
         mhubMetadataRequest(mhub, transport);
     } else {
@@ -4416,7 +4505,21 @@ static int moreConnected(ism_transport_t * transport) {
                 pthread_mutex_unlock(&part->lock);
                 mhub->open +=1;
                 mhub->notopen -=1;
+                TRACE(5, "DBG moreConnected: connect=%u name=%s PARTITION OPEN: "
+                         "topic=%s partID=%d nodeID=%d mhub->open=%d mhub->notopen=%d\n",
+                    transport->index, transport->name,
+                    transport->pobj->topic, transport->pobj->partID, transport->pobj->nodeID,
+                    mhub->open, mhub->notopen);
+            } else {
+                TRACE(5, "DBG moreConnected: connect=%u name=%s PARTITION NOT FOUND/OOB: "
+                         "topic=%s partID=%d partcount=%u\n",
+                    transport->index, transport->name,
+                    transport->pobj->topic, transport->pobj->partID,
+                    topic ? topic->partcount : 0);
             }
+        } else {
+            TRACE(5, "DBG moreConnected: connect=%u name=%s DATA connection but no topic set\n",
+                transport->index, transport->name);
         }
 
         ism_mhub_lock(mhub);
@@ -4424,6 +4527,8 @@ static int moreConnected(ism_transport_t * transport) {
             int time = mhubBatchTimeMillis / 3;
             mhub->produce_timer = ism_common_setTimerRate(ISM_TIMER_HIGH,  mhubPartitionProduceTimer,
                             mhub, mhubBatchTimeMillis, time, TS_MILLISECONDS);
+            TRACE(5, "DBG moreConnected: connect=%u name=%s produce_timer started (batchMs=%d)\n",
+                transport->index, transport->name, mhubBatchTimeMillis);
         }
         ism_mhub_unlock(mhub);
     }
@@ -4649,6 +4754,14 @@ static int ism_mhub_connected(ism_transport_t * transport, int rc) {
     char xbuf [2048];
     concat_alloc_t buf = {xbuf, sizeof xbuf, 4};
     transport->lastAccessTime = ism_common_readTSC();
+    TRACE(5, "DBG ism_mhub_connected: connect=%u name=%s rc=%d kafka_type=%d "
+             "versionKnown=%d mhubSASL=%d verSaslHandshake=%d verSaslAuthenticate=%d "
+             "verProduce=%d verMetadata=%d server_addr=%s serverport=%u\n",
+        transport->index, transport->name, rc, transport->pobj->kafka_type,
+        mhub->versionKnown, mhub->mhubSASL,
+        mhub->verSaslHandshake, mhub->verSaslAuthenticate,
+        mhub->verProduce, mhub->verMetadata,
+        transport->server_addr, transport->serverport);
     TRACE(7, "Event Streams connected (before auth): connect=%u name=%s rc=%d\n", transport->index, transport->name, rc);
     //Handle the case of msproxy shutdown
     if(g_shuttingDown){
@@ -4694,6 +4807,8 @@ static int ism_mhub_connected(ism_transport_t * transport, int rc) {
      *   -> SaslAuthenticate (SCRAM exchange)
      *   -> MetadataRequest -> partitions open
      */
+    TRACE(5, "DBG ism_mhub_connected: connect=%u name=%s -> sending ApiVersionsRequest v0 (legacy header)\n",
+        transport->index, transport->name);
     ism_kafka_putInt2(&buf, ApiVersionsRequest);         /* API key 18 */
     ism_kafka_putInt2(&buf, 0);                          /* version 0 (legacy header v1) */
     ism_kafka_putInt4(&buf, 0x30003);                    /* Correlation ID */
