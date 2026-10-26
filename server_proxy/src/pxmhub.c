@@ -4549,12 +4549,18 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
     /*
      * Use the broker-reported SaslAuthenticate API version.
      * v0 – legacy length-prefixed payload (all Kafka versions).
-     * v2 – flexible encoding (compact bytes + tagged-fields, Kafka 2.0+).
-     * We support up to v2; clamp if broker reported higher.
+     * v1 – adds session_lifetime_ms at end; same wire format as v0 otherwise.
+     * v2 – flexible encoding (compact bytes + tagged-fields, Kafka 2.4+).
+     *
+     * Even though Kafka 4.x reports verSaslAuthenticate=2, routing through
+     * the OpenShift ingress (SNI passthrough route) causes the flexible v2
+     * encoding to be dropped silently — the broker closes the connection
+     * without returning a response.  v1 works correctly end-to-end.
+     * Cap at v1 until flexible SaslAuthenticate is confirmed working.
      */
     uint8_t sasl_auth_ver = 0;
-    if (mhub->verSaslAuthenticate != 0xff && mhub->verSaslAuthenticate >= 2)
-        sasl_auth_ver = 2;
+    if (mhub->verSaslAuthenticate != 0xff && mhub->verSaslAuthenticate >= 1)
+        sasl_auth_ver = 1;
 
     if (kind == 2) {
         userlen = mhub->username ? strlen(mhub->username) : 0;
