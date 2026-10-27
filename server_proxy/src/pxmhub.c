@@ -3757,7 +3757,9 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
          *        response body tagged-fields byte.
          */
         case 0x30002: {
-            int flex_auth = (mhub->verSaslAuthenticate != 0xff && mhub->verSaslAuthenticate >= 2);
+            /* flex_auth must match what sendSASL actually sent (sasl_auth_ver >= 2).
+             * Since we cap sasl_auth_ver at 1, the response is always legacy encoding. */
+            int flex_auth = 0;
             rc  = ism_kafka_getInt2(buf);
             TRACE(5, "DBG SaslAuthenticateResponse: connect=%u name=%s rc=%d flex_auth=%d "
                      "verSaslAuthenticate=%d mechanism=%d buf_remaining=%d\n",
@@ -4549,12 +4551,18 @@ static void sendSASL(ism_transport_t * transport, concat_alloc_t * buf, int kind
     /*
      * Use the broker-reported SaslAuthenticate API version.
      * v0 – legacy length-prefixed payload (all Kafka versions).
-     * v2 – flexible encoding (compact bytes + tagged-fields, Kafka 2.0+).
-     * We support up to v2; clamp if broker reported higher.
+     * v1 – adds session_lifetime_ms INT64 at end; same wire format as v0 otherwise.
+     * v2 – flexible encoding (compact bytes + tagged-fields, Kafka 2.4+).
+     *
+     * Even though Kafka 4.x reports verSaslAuthenticate=2, routing through
+     * the OpenShift SNI-passthrough ingress causes the broker to close the
+     * connection with TLS close_notify immediately when it receives the
+     * flexible v2 wire encoding.  v1 works correctly end-to-end.
+     * Cap at v1 until flexible SaslAuthenticate is confirmed working.
      */
     uint8_t sasl_auth_ver = 0;
-    if (mhub->verSaslAuthenticate != 0xff && mhub->verSaslAuthenticate >= 2)
-        sasl_auth_ver = 2;
+    if (mhub->verSaslAuthenticate != 0xff && mhub->verSaslAuthenticate >= 1)
+        sasl_auth_ver = 1;
 
     if (kind == 2) {
         userlen = mhub->username ? strlen(mhub->username) : 0;
