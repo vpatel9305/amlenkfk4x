@@ -101,9 +101,22 @@ static const char * mhubStateString(int state) {
  * ProduceRequest v9+ and MetadataRequest v9+ use compact strings/arrays
  * with trailing empty tagged-fields bytes in every request/response header.
  * Kafka 4.0 removed support for ProduceRequest v0-v8 entirely.
+ *
+ * However, the OpenShift SNI-passthrough ingress route silently rejects
+ * flexible request header v2 (compact-string clientId + tagged-fields byte)
+ * for all request types, even after SASL authentication completes.  The
+ * broker closes the connection with TLS close_notify immediately.
+ *
+ * Workaround: cap both Metadata and Produce at version 8 so that request
+ * header v1 (legacy INT16 clientId, no tagged-fields) is used throughout.
+ * Version 8 supports all fields required (allow_auto_topic_creation,
+ * RecordBatch magic=2) and is accepted by the broker end-to-end.
  */
 #define KAFKA_PRODUCE_FLEXIBLE_VERSION   9
 #define KAFKA_METADATA_FLEXIBLE_VERSION  9
+/* Maximum versions to use via SNI-passthrough ingress (request header v1) */
+#define KAFKA_METADATA_MAX_VER           8
+#define KAFKA_PRODUCE_MAX_VER            8
 
 /*
  * Write a compact (unsigned-varint prefixed) string as used in flexible
@@ -2824,9 +2837,10 @@ void ism_mhub_mapKafkaVersion(ism_mhub_t * mhub, int version) {
          break;
      case 3:   /* 3.0+ / 4.x: flexible encoding, produce version from broker */
          mhub->messageVersion = 2;   /* RecordBatch (magic=2) unchanged */
-         /* Use broker-reported produce version, clamped to flexible threshold */
+         /* Cap at KAFKA_PRODUCE_MAX_VER (v8): SNI-passthrough ingress rejects
+          * flexible request header v2 used by ProduceRequest v9+. */
          if (mhub->verProduce >= KAFKA_PRODUCE_FLEXIBLE_VERSION)
-             mhub->produceVersion = KAFKA_PRODUCE_FLEXIBLE_VERSION;
+             mhub->produceVersion = KAFKA_PRODUCE_MAX_VER;
          else if (mhub->verProduce >= 1)
              mhub->produceVersion = (uint8_t)mhub->verProduce;
          else
@@ -3330,7 +3344,9 @@ static int mhubReceiveKafka(ism_transport_t * transport, char * inbuf, int bufle
      * v9+    – flexible: compact-array length (varint), compact strings,
      *          per-partition/topic/response tagged-fields bytes.
      */
-    int flex_rsp = (mhub->produceVersion >= KAFKA_PRODUCE_FLEXIBLE_VERSION);
+    /* Since produceVersion is capped at KAFKA_PRODUCE_MAX_VER (v8),
+     * the response is always legacy (non-flexible). */
+    int flex_rsp = 0;
     now = ism_common_currentTimeNanos();
     if (flex_rsp) {
         response_count = getKafkaCompactArrayLen(buf);
@@ -4038,7 +4054,10 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
      * We detect flexible encoding from the mhub's negotiated verMetadata.
      */
     if (corrid == 0x20000) {             /* Metadata */
-        int flex_meta = (mhub->verMetadata >= KAFKA_METADATA_FLEXIBLE_VERSION);
+        /* Response encoding matches what we requested.  Since we cap at
+         * KAFKA_METADATA_MAX_VER (v8) to use request header v1, the response
+         * is always legacy (non-flexible) regardless of verMetadata. */
+        int flex_meta = 0;
 
         /* throttle_time_ms: INT32 present as first field in MetadataResponse v3+ (all encodings) */
         if (mhub->verMetadata >= 3)
@@ -4380,7 +4399,7 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
      */
     uint8_t meta_ver = 0;
     if (mhub->verMetadata >= KAFKA_METADATA_FLEXIBLE_VERSION)
-        meta_ver = KAFKA_METADATA_FLEXIBLE_VERSION;
+        meta_ver = KAFKA_METADATA_MAX_VER;   /* cap at v8: request header v1 */
     else if (mhub->verMetadata >= 4)
         meta_ver = 4;
 
