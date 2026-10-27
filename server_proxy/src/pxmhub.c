@@ -4082,15 +4082,23 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                 char * rack_ignored;
                 getKafkaCompactString(buf, &rack_ignored);  /* rack: compact nullable string */
                 skipKafkaTagBuf(buf);     /* per-broker tagged-fields */
+            } else if (mhub->verMetadata >= 1) {
+                /* v1+: rack is NULLABLE_STRING (INT16 len + bytes; -1 = null) */
+                char * rack_ignored;
+                ism_kafka_getString(buf, &rack_ignored);
             }
             TRACE(8, "MessageHub broker metadata: arrayindex=%d nodeid=%d broker=%s port=%d\n",
             			i, brokers[i].nodeid, brokers[i].broker, brokers[i].port);
         }
 
-        /* cluster_id (nullable compact string) and controller_id (INT32) in v2+ flexible */
+        /* v2+: cluster_id (NULLABLE_STRING) and controller_id (INT32) follow the broker array */
         if (flex_meta) {
             char * cid_ignored;
             getKafkaCompactString(buf, &cid_ignored);   /* cluster_id: compact nullable string */
+            ism_kafka_getInt4(buf);                     /* controller_id */
+        } else if (mhub->verMetadata >= 2) {
+            char * cid_ignored;
+            ism_kafka_getString(buf, &cid_ignored);     /* cluster_id: nullable string */
             ism_kafka_getInt4(buf);                     /* controller_id */
         }
 
@@ -4111,6 +4119,9 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                 topiclen = getKafkaCompactString(buf, &topicstr);
             else
                 topiclen = ism_kafka_getString(buf, &topicstr);
+            /* v1+: is_internal (INT8) follows topic name in all non-flexible versions */
+            if (!flex_meta && mhub->verMetadata >= 1)
+                ism_kafka_getInt1(buf);
             int part_cnt;
             if (flex_meta)
                 part_cnt = getKafkaCompactArrayLen(buf);
@@ -4155,6 +4166,8 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                 }
                 if (flex_meta)
                     skipKafkaTagBuf(buf);       /* per-topic tagged-fields */
+                else if (mhub->verMetadata >= 8)
+                    ism_kafka_getInt4(buf);     /* v8+: topic_authorized_operations (INT32) */
             }
         }
         if (flex_meta)
@@ -4438,10 +4451,8 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
     }
     if (flexible_meta) {
         putKafkaTagBuf(buf);                    /* request body tagged-fields */
-    } else {
-        /* v0 legacy: extra trailing topic string used as a filter */
-        ism_kafka_putString(buf, transport->pobj->topic, -1);
     }
+    /* Note: v0 had a trailing topic filter string, but v4-v8 do not — removed. */
 
     LOG(INFO, Server, 979, "%u%s%s%u%s", "MessageHub metadatarequest submitted: connect={0} name={1} server_addr={2} server_port={3} broker={4}",
     		transport->index, transport->name, transport->server_addr, transport->serverport,
