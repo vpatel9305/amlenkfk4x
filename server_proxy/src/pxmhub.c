@@ -114,8 +114,12 @@ static const char * mhubStateString(int state) {
  */
 #define KAFKA_PRODUCE_FLEXIBLE_VERSION   9
 #define KAFKA_METADATA_FLEXIBLE_VERSION  9
-/* Maximum versions to use via SNI-passthrough ingress (request header v1) */
-#define KAFKA_METADATA_MAX_VER           8
+/* Kafka 4.x dropped MetadataRequest v0-v8; minimum accepted is v9.
+ * The SNI-passthrough ingress rejects request header v2 (compact clientId +
+ * tagged-fields byte), so we use request header v1 (INT16 clientId) even
+ * for flexible API versions.  Set MAX to 9 so we send the flexible body
+ * but still write the header with a plain INT16 clientId string. */
+#define KAFKA_METADATA_MAX_VER           9
 #define KAFKA_PRODUCE_MAX_VER            8
 
 /*
@@ -4054,10 +4058,11 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
      * We detect flexible encoding from the mhub's negotiated verMetadata.
      */
     if (corrid == 0x20000) {             /* Metadata */
-        /* Response encoding matches what we requested.  Since we cap at
-         * KAFKA_METADATA_MAX_VER (v8) to use request header v1, the response
-         * is always legacy (non-flexible) regardless of verMetadata. */
-        int flex_meta = 0;
+        /* Response encoding matches the version we requested (KAFKA_METADATA_MAX_VER).
+         * With MAX_VER=9 the broker replies with flexible encoding (compact arrays,
+         * compact strings, per-entry tagged-fields).  The request header is still v1
+         * (INT16 clientId) — only the *body* encoding is flexible. */
+        int flex_meta = (KAFKA_METADATA_MAX_VER >= KAFKA_METADATA_FLEXIBLE_VERSION);
 
         /* throttle_time_ms: INT32 present as first field in MetadataResponse v3+ (all encodings) */
         if (mhub->verMetadata >= 3)
@@ -4423,7 +4428,7 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
      */
     uint8_t meta_ver = 0;
     if (mhub->verMetadata >= KAFKA_METADATA_FLEXIBLE_VERSION)
-        meta_ver = KAFKA_METADATA_MAX_VER;   /* cap at v8: request header v1 */
+        meta_ver = KAFKA_METADATA_MAX_VER;   /* v9: flexible body, header v1 */
     else if (mhub->verMetadata >= 4)
         meta_ver = 4;
 
@@ -4432,12 +4437,11 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
     ism_kafka_putInt2(buf, MetadataRequest);    /* API key = 3 */
     ism_kafka_putInt2(buf, meta_ver);           /* version   */
     ism_kafka_putInt4(buf, 0x20000);            /* Correlation ID */
-    if (flexible_meta) {
-        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1);
-        putKafkaTagBuf(buf);                    /* request header tagged-fields */
-    } else {
-        ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
-    }
+    /* Always use request header v1 (INT16 clientId, no tagged-fields byte).
+     * The SNI-passthrough ingress rejects request header v2 (compact clientId
+     * + tagged-fields byte) used by flexible APIs, so we write header v1
+     * unconditionally and use flexible encoding only in the request body. */
+    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
 
     /* topic array */
     if (flexible_meta) {
