@@ -4141,6 +4141,9 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                     int partrc =  ism_kafka_getInt2(buf);
                     int partid =  ism_kafka_getInt4(buf);
                     int leader =  ism_kafka_getInt4(buf);
+                    /* v7+: leader_epoch (INT32) after leader node id */
+                    if (!flex_meta && mhub->verMetadata >= 7)
+                        ism_kafka_getInt4(buf);
                     int replica;
                     if (flex_meta)
                         replica = getKafkaCompactArrayLen(buf);
@@ -4154,6 +4157,12 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                         isr = ism_kafka_getInt4(buf) & 0xffff;
                     if (isr < 0) isr = 0;
                     buf->pos += 4 * isr;       /* Skip over isr node-id array */
+                    /* v5+: offline_replicas array (INT32 count + INT32[] node IDs) */
+                    if (!flex_meta && mhub->verMetadata >= 5) {
+                        int offline = ism_kafka_getInt4(buf) & 0xffff;
+                        if (offline < 0) offline = 0;
+                        buf->pos += 4 * offline;
+                    }
                     if (flex_meta)
                         skipKafkaTagBuf(buf);   /* per-partition tagged-fields */
                     if (ism_kafka_more(buf) >= 0) {
@@ -4167,11 +4176,13 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                 if (flex_meta)
                     skipKafkaTagBuf(buf);       /* per-topic tagged-fields */
                 else if (mhub->verMetadata >= 8)
-                    ism_kafka_getInt4(buf);     /* v8+: topic_authorized_operations (INT32) */
+                    ism_kafka_getInt4(buf);     /* v8: topic_authorized_operations (INT32) */
             }
         }
         if (flex_meta)
             skipKafkaTagBuf(buf);               /* response body tagged-fields */
+        else if (mhub->verMetadata >= 8)
+            ism_kafka_getInt4(buf);             /* v8: cluster_authorized_operations (INT32) */
         mhub->expectingMetadata = 0;
     }
     if (rc) {
