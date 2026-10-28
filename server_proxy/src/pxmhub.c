@@ -4437,11 +4437,16 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
     ism_kafka_putInt2(buf, MetadataRequest);    /* API key = 3 */
     ism_kafka_putInt2(buf, meta_ver);           /* version   */
     ism_kafka_putInt4(buf, 0x20000);            /* Correlation ID */
-    /* Always use request header v1 (INT16 clientId, no tagged-fields byte).
-     * The SNI-passthrough ingress rejects request header v2 (compact clientId
-     * + tagged-fields byte) used by flexible APIs, so we write header v1
-     * unconditionally and use flexible encoding only in the request body. */
-    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
+    /* For flexible MetadataRequest v9+, the broker requires request header v2
+     * (compact clientId + tagged-fields byte).  This request is sent post-SASL;
+     * the SNI-passthrough ingress behaves as a transparent TCP proxy for
+     * authenticated connections so header v2 passes through correctly. */
+    if (flexible_meta) {
+        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1);
+        putKafkaTagBuf(buf);                    /* request header tagged-fields */
+    } else {
+        ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
+    }
 
     /* topic array */
     if (flexible_meta) {
