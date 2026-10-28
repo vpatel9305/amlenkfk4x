@@ -4082,10 +4082,9 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
      * We detect flexible encoding from the mhub's negotiated verMetadata.
      */
     if (corrid == 0x20000) {             /* Metadata */
-        /* Response encoding matches the version we requested (KAFKA_METADATA_MAX_VER).
-         * With MAX_VER=9 the broker replies with flexible encoding (compact arrays,
-         * compact strings, per-entry tagged-fields).  The request header is still v1
-         * (INT16 clientId) — only the *body* encoding is flexible. */
+        /* Response encoding matches the version we requested (KAFKA_METADATA_MAX_VER=8).
+         * v8 is non-flexible: legacy INT32 array lengths, INT16 strings, no tagged-fields.
+         * flex_meta is false (8 < 9), so all legacy parsing paths below are taken. */
         int flex_meta = (KAFKA_METADATA_MAX_VER >= KAFKA_METADATA_FLEXIBLE_VERSION);
 
         /* throttle_time_ms: INT32 present as first field in MetadataResponse v3+ (all encodings) */
@@ -4481,6 +4480,10 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
 
     if (meta_ver >= 4) {
         ism_kafka_putInt1(buf, 0);              /* allow_auto_topic_creation = false (v4+) */
+    }
+    if (meta_ver >= 8) {
+        ism_kafka_putInt1(buf, 0);              /* include_cluster_authorized_operations = false (v8+) */
+        ism_kafka_putInt1(buf, 0);              /* include_topic_authorized_operations   = false (v8+) */
     }
     /* No body tagged-fields: v8 is non-flexible. */
 
