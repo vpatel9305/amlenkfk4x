@@ -4468,19 +4468,31 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
     ism_kafka_putInt2(buf, MetadataRequest);    /* API key = 3 */
     ism_kafka_putInt2(buf, meta_ver);           /* version   */
     ism_kafka_putInt4(buf, 0x20000);            /* Correlation ID */
-    /* Always use request header v1 (INT16 clientId, no tagged-fields byte).
+    /*
+     * Request header v2 for flexible MetadataRequest v9+:
+     *   compact clientId (varint len+1) + tagged-fields byte (0x00)
      *
-     * MetadataRequest v9 spec requires header v2 (compact clientId + tagged-fields).
-     * However the OpenShift SNI-passthrough ingress strips the tagged-fields byte
-     * from every post-SASL flexible request header, causing the broker to read the
-     * first body byte as part of the clientId length and fail with:
-     *   "Error reading byte array of N byte(s): only M byte(s) available"
+     * The OpenShift SNI-passthrough ingress strips exactly ONE byte from every
+     * post-SASL Kafka request header — specifically the 0x00 tagged-fields byte
+     * at the end of the header.  The broker then reads the first body byte in its
+     * place and misparses the request.
      *
-     * The broker accepts header v1 (INT16 clientId) even for v9 when the body is
-     * correctly flexible-encoded.  Using header v1 passes through the ingress intact.
+     * Workaround: prepend an extra 0x00 padding byte before the real tagged-fields.
+     * The ingress strips the first 0x00, the broker receives the real 0x00 tagged-
+     * fields byte and correctly parses the flexible body.
+     *
+     * Wire layout we send (header v2 + 1 padding byte):
+     *   compact clientId | 0x00 (padding, stripped by ingress) | 0x00 (tagged-fields)
+     * What the broker receives (after ingress strips padding):
+     *   compact clientId | 0x00 (tagged-fields) | <flexible body>  ← correct header v2
      */
-    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId (header v1) */
-    /* no tagged-fields byte: header v1 does not carry one */
+    if (flexible_meta) {
+        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
+        ism_kafka_putInt1(buf, 0);          /* 0x00 padding — stripped by SNI ingress */
+        putKafkaTagBuf(buf);                /* 0x00 real tagged-fields, seen by broker */
+    } else {
+        ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
+    }
 
     /* topic array */
     if (flexible_meta) {
