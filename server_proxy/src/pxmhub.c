@@ -3323,9 +3323,15 @@ static int mhubReceiveKafka(ism_transport_t * transport, char * inbuf, int bufle
     }
 
     /*
-     * Check for the type of response based on the correlation ID
+     * Check for the type of response based on the correlation ID.
+     * Flexible responses (ProduceResponse v9+) use response header v1:
+     *   INT32(correlationId) BYTE(tagged_fields=0x00)
+     * Consume the tagged-fields byte before reading the body.
      */
     int  corrid = ism_kafka_getInt4(buf);
+    int flex_produce_rsp = (mhub->produceVersion >= KAFKA_PRODUCE_FLEXIBLE_VERSION);
+    if (flex_produce_rsp)
+        skipKafkaTagBuf(buf);   /* response header v1 tagged-fields */
 
     /*
      * Parse metadata and any SASL responses
@@ -3348,9 +3354,9 @@ static int mhubReceiveKafka(ism_transport_t * transport, char * inbuf, int bufle
      * v9+    – flexible: compact-array length (varint), compact strings,
      *          per-partition/topic/response tagged-fields bytes.
      */
-    /* Since produceVersion is capped at KAFKA_PRODUCE_MAX_VER (v8),
-     * the response is always legacy (non-flexible). */
-    int flex_rsp = 0;
+    /* produceVersion is capped at KAFKA_PRODUCE_MAX_VER (v8); v8 is non-flexible.
+     * flex_rsp would only be 1 for v9+, which we never send. */
+    int flex_rsp = flex_produce_rsp;
     now = ism_common_currentTimeNanos();
     if (flex_rsp) {
         response_count = getKafkaCompactArrayLen(buf);
@@ -3374,12 +3380,30 @@ static int mhubReceiveKafka(ism_transport_t * transport, char * inbuf, int bufle
             partrc = ism_kafka_getInt2(buf);
             offset = ism_kafka_getInt8(buf);
             if (mhub->produceVersion >= 2) {
-                timestamp = ism_kafka_getInt8(buf);
+                timestamp = ism_kafka_getInt8(buf);     /* log_append_time_ms (v2+) */
             }
-            if (flex_rsp) {
-                ism_kafka_getInt4(buf);   /* log_start_offset (v5+) */
-                skipKafkaTagBuf(buf);     /* per-partition tagged-fields */
+            if (mhub->produceVersion >= 5) {
+                ism_kafka_getInt8(buf);                 /* log_start_offset (v5+, INT64) */
             }
+            if (mhub->produceVersion >= 8) {
+                /* record_errors: compact-array (v9 flex) or plain array (v8 non-flex) */
+                int nerr = flex_rsp ? getKafkaCompactArrayLen(buf) : ism_kafka_getInt4(buf);
+                if (nerr < 0) nerr = 0;
+                for (int e = 0; e < nerr; e++) {
+                    ism_kafka_getInt4(buf);             /* batch_index (INT32) */
+                    if (flex_rsp)
+                        getKafkaCompactString(buf, NULL);  /* batch_index_error_message */
+                    else
+                        ism_kafka_getString(buf, NULL);
+                }
+                /* error_message: nullable string */
+                if (flex_rsp)
+                    getKafkaCompactString(buf, NULL);
+                else
+                    ism_kafka_getString(buf, NULL);
+            }
+            if (flex_rsp)
+                skipKafkaTagBuf(buf);                   /* per-partition tagged-fields */
             needmetadata += produceResponse(mhub, topicname, topiclen, partid, partrc, offset, timestamp);
         }
         if (flex_rsp)
@@ -3692,12 +3716,8 @@ static int receiveSASL(ism_transport_t * transport, char * inbuf, int buflen, in
         transport->pobj->auth_require,
         mhub->versionKnown, mhub->verSaslHandshake, mhub->verSaslAuthenticate,
         mhub->mhubSASL, mhub->sasl_mechanism);
-    if (SHOULD_TRACEC(5, Kafka)) {
-        char trcbuf[64];
-        int maxsize = ism_common_getTraceMsgData() + 64;
-        sprintf(trcbuf, "DBG receiveSASL raw buf connect=%u", transport->index);
-        traceDataFunction(trcbuf, 0, __FILE__, __LINE__, inbuf, buflen, maxsize);
-    }
+    /* Raw SASL buffer trace intentionally omitted: it would expose auth bytes
+     * (SCRAM nonces, salts, proofs) in the trace log. */
 
     /*
      * Handle SASL which comes in without any frame (legacy before Kafka 1.0)
@@ -4032,8 +4052,13 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
         return receiveSASL(transport, inbuf, buflen, kind);
     }
 
-    /* Get the correlation ID */
+    /* Get the correlation ID.
+     * Flexible responses (MetadataResponse v9+) use response header v1:
+     *   INT32(correlationId) BYTE(tagged_fields=0x00)
+     * Consume the tagged-fields byte before reading the body. */
     int  corrid = ism_kafka_getInt4(buf);
+    if (KAFKA_METADATA_MAX_VER >= KAFKA_METADATA_FLEXIBLE_VERSION)
+        skipKafkaTagBuf(buf);   /* response header v1 tagged-fields */
     TRACE(5, "DBG mhubReceiveMetadata: connect=%u name=%s corrid=0x%08x buflen=%d\n",
         transport->index, transport->name, corrid, buflen);
 
@@ -4124,9 +4149,15 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
                 topiclen = getKafkaCompactString(buf, &topicstr);
             else
                 topiclen = ism_kafka_getString(buf, &topicstr);
-            /* v1+: is_internal (INT8) follows topic name in all non-flexible versions */
-            if (!flex_meta && mhub->verMetadata >= 1)
+            if (flex_meta) {
+                /* v9 flexible: topic_id UUID (16 bytes) follows topic name */
+                buf->pos += 16;
+                /* is_internal (INT8) follows topic_id in flexible encoding */
                 ism_kafka_getInt1(buf);
+            } else if (mhub->verMetadata >= 1) {
+                /* v1-v8 non-flexible: is_internal (INT8) follows topic name */
+                ism_kafka_getInt1(buf);
+            }
             int part_cnt;
             if (flex_meta)
                 part_cnt = getKafkaCompactArrayLen(buf);
