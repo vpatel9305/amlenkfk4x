@@ -3672,23 +3672,65 @@ static int receiveApiVersions(ism_transport_t * transport, concat_alloc_t * buf)
          mhub->kafka_version = kver;   /* Value is always a constant */
 
          /*
-          * Auto-select encoding tier when MessageHubAPIVersion is not pinned.
-          * Tier 3 is required for Kafka 4.x (verProduce >= 9, flexible encoding).
-          * Tier 2 is used for Kafka 0.11-3.x (RecordBatch, legacy encoding).
+          * Update the produce version now that the broker's advertised range is known.
+          *
+          * Valid apiVersion values are 0–3 and 0x20 (auto-detect sentinel).
+          *
+          * apiVersion == 3 or apiVersion >= 0x20 (auto):
+          *   Run (or re-run) ism_mhub_mapKafkaVersion() now that verProduce is
+          *   populated.  mapKafkaVersion(3) was called at config-parse time when
+          *   verProduce was still 0, so it fell through to produceVersion=1.
+          *   Re-running it with verProduce=13 sets produceVersion=8 via the cap.
+          *
+          *   Note on global override: if MessageHubAPIVersion is set as a global
+          *   config property it takes precedence over the per-mhub KafkaAPIVersion
+          *   during this remap.  That is intentional — a global pinned version
+          *   overrides per-connection auto-selection.
+          *
+          * apiVersion 0–2 (explicit legacy pins):
+          *   These select produceVersion <= 1 (tier 0 sets it to 0) and are not
+          *   remapped here.
+          *   If the broker also advertises verProduce >= KAFKA_PRODUCE_FLEXIBLE_VERSION
+          *   (9) the selected version may be below the broker's minimum — Kafka 4.0
+          *   removed Produce v0–v2 (valid range is v3–v13).  A warning is logged;
+          *   the operator must correct the configuration.  verProduce >= 9 is used
+          *   as the guard because that is the version at which flexible Produce was
+          *   introduced (Kafka 3.0), which is the strongest proxy available for
+          *   "broker removed v0–v2" without querying the broker's minimum directly.
           */
-         if (mhub->verProduce >= 4 && mhub->apiVersion < 2) {
+         if (mhub->verProduce >= 4 &&
+             (mhub->apiVersion == 3 || mhub->apiVersion >= 0x20)) {
+             /* apiVersion=3 or auto — re-run mapping now verProduce is known. */
              int mhubver = ism_common_getIntConfig("MessageHubAPIVersion", -1);
              if (mhubver < 0) {
+                 /* No global override — tier 3 for Kafka 4.x, tier 2 for older. */
                  mhubver = (mhub->verProduce >= KAFKA_PRODUCE_FLEXIBLE_VERSION) ? 3 : 2;
              }
              if (mhubver < 0 || mhubver > 3)
                  mhubver = 2;
              ism_mhub_mapKafkaVersion(mhub, mhubver);
+         } else if (mhub->verProduce >= KAFKA_PRODUCE_FLEXIBLE_VERSION &&
+                    mhub->produceVersion < 3) {
+             /*
+              * The broker advertises verProduce >= 9 (Kafka 3.0+, which introduced
+              * flexible Produce encoding).  Kafka 4.0 removed Produce v0–v2, so a
+              * broker in this range may reject the selected produceVersion.
+              * Do not silently override an explicit configuration — warn so the
+              * operator can set KafkaAPIVersion=3 or omit it for auto-selection.
+              */
+             LOG(WARN, Server, 939, "%s%-s",
+                 "Produce version may be unsupported by this broker: Connection={0} Property={1}",
+                 mhub->name,
+                 "KafkaAPIVersion selects Produce v0-v2 but broker advertises v9+ (Kafka 4.0 removed v0-v2); set KafkaAPIVersion=3 or omit it");
          }
          ism_mhub_unlock(mhub);
          TRACE(4, "Kafka version %s: mhub=%s produce=%u fetch=%u metadata=%u saslHandshake=%u saslAuthenticate=%u flexible=%d\n",
                  kver, mhub->id, mhub->verProduce, mhub->verFetch, mhub->verMetadata,
                  mhub->verSaslHandshake, mhub->verSaslAuthenticate, flexible);
+         TRACE(5, "Kafka API negotiation complete: mhub=%s apiVersion=%d verProduce=%d "
+                 "produceVersion=%d messageVersion=%d\n",
+                 mhub->id, mhub->apiVersion, mhub->verProduce,
+                 mhub->produceVersion, mhub->messageVersion);
     }
     return 0;
 }
