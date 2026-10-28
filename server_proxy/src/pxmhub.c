@@ -4468,16 +4468,19 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
     ism_kafka_putInt2(buf, MetadataRequest);    /* API key = 3 */
     ism_kafka_putInt2(buf, meta_ver);           /* version   */
     ism_kafka_putInt4(buf, 0x20000);            /* Correlation ID */
-    /* For flexible MetadataRequest v9+, the broker requires request header v2
-     * (compact clientId + tagged-fields byte).  This request is sent post-SASL;
-     * the SNI-passthrough ingress behaves as a transparent TCP proxy for
-     * authenticated connections so header v2 passes through correctly. */
-    if (flexible_meta) {
-        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1);
-        putKafkaTagBuf(buf);                    /* request header tagged-fields */
-    } else {
-        ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);
-    }
+    /* Always use request header v1 (INT16 clientId, no tagged-fields byte).
+     *
+     * MetadataRequest v9 spec requires header v2 (compact clientId + tagged-fields).
+     * However the OpenShift SNI-passthrough ingress strips the tagged-fields byte
+     * from every post-SASL flexible request header, causing the broker to read the
+     * first body byte as part of the clientId length and fail with:
+     *   "Error reading byte array of N byte(s): only M byte(s) available"
+     *
+     * The broker accepts header v1 (INT16 clientId) even for v9 when the body is
+     * correctly flexible-encoded.  Using header v1 passes through the ingress intact.
+     */
+    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId (header v1) */
+    /* no tagged-fields byte: header v1 does not carry one */
 
     /* topic array */
     if (flexible_meta) {
