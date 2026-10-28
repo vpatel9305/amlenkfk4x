@@ -102,24 +102,21 @@ static const char * mhubStateString(int state) {
  * with trailing empty tagged-fields bytes in every request/response header.
  * Kafka 4.0 removed support for ProduceRequest v0-v8 entirely.
  *
- * However, the OpenShift SNI-passthrough ingress route silently rejects
- * flexible request header v2 (compact-string clientId + tagged-fields byte)
- * for all request types, even after SASL authentication completes.  The
- * broker closes the connection with TLS close_notify immediately.
+ * The OpenShift SNI-passthrough ingress strips the 0x00 tagged-fields byte
+ * from flexible (header v2) Kafka requests post-SASL, causing the broker to
+ * misparse the request body with "Error reading byte array of N byte(s)".
  *
- * Workaround: cap both Metadata and Produce at version 8 so that request
- * header v1 (legacy INT16 clientId, no tagged-fields) is used throughout.
- * Version 8 supports all fields required (allow_auto_topic_creation,
- * RecordBatch magic=2) and is accepted by the broker end-to-end.
+ * Workaround: cap Metadata at v8 (non-flexible, legacy header v1).
+ * The broker's ApiVersionsResponse advertises Metadata max=13 with min=0,
+ * so v8 is within the supported range.  Produce is also capped at v8.
+ * Both use legacy request header v1 (INT16 clientId, no tagged-fields)
+ * and legacy body encoding, which pass through the ingress intact.
  */
 #define KAFKA_PRODUCE_FLEXIBLE_VERSION   9
 #define KAFKA_METADATA_FLEXIBLE_VERSION  9
-/* Kafka 4.x dropped MetadataRequest v0-v8; minimum accepted is v9.
- * The SNI-passthrough ingress rejects request header v2 (compact clientId +
- * tagged-fields byte), so we use request header v1 (INT16 clientId) even
- * for flexible API versions.  Set MAX to 9 so we send the flexible body
- * but still write the header with a plain INT16 clientId string. */
-#define KAFKA_METADATA_MAX_VER           9
+/* Cap both at v8: non-flexible, legacy header v1, passes ingress intact.
+ * Broker advertises min=0 for both Metadata and Produce, so v8 is valid. */
+#define KAFKA_METADATA_MAX_VER           8
 #define KAFKA_PRODUCE_MAX_VER            8
 
 /*
@@ -4057,8 +4054,10 @@ static int mhubReceiveMetadata(ism_transport_t * transport, char * inbuf, int bu
      *   INT32(correlationId) BYTE(tagged_fields=0x00)
      * Consume the tagged-fields byte before reading the body. */
     int  corrid = ism_kafka_getInt4(buf);
+    /* Skip response header tagged-fields only for flexible MetadataResponse (v9+).
+     * With KAFKA_METADATA_MAX_VER=8 this condition is false — no byte to skip. */
     if (KAFKA_METADATA_MAX_VER >= KAFKA_METADATA_FLEXIBLE_VERSION)
-        skipKafkaTagBuf(buf);   /* response header v1 tagged-fields */
+        skipKafkaTagBuf(buf);   /* response header v1 tagged-fields (v9+ only) */
     TRACE(5, "DBG mhubReceiveMetadata: connect=%u name=%s corrid=0x%08x buflen=%d\n",
         transport->index, transport->name, corrid, buflen);
 
@@ -4453,72 +4452,37 @@ static void mhubMetadataRequest(ism_mhub_t * mhub, ism_transport_t * transport) 
 
     /*
      * Choose MetadataRequest version based on what the broker reported.
-     * v0   – original legacy format; Kafka 4.x dropped support for v0-v3.
+     * v0   – original legacy format.
      * v4   – adds allow_auto_topic_creation field (Kafka 2.4+).
-     * v9+  – flexible encoding: compact strings/arrays + tagged-fields.
+     * v8   – current cap (KAFKA_METADATA_MAX_VER=8); non-flexible, legacy header v1.
+     *        The broker advertises max=13 with min=0, so v8 is fully supported.
      */
     uint8_t meta_ver = 0;
-    if (mhub->verMetadata >= KAFKA_METADATA_FLEXIBLE_VERSION)
-        meta_ver = KAFKA_METADATA_MAX_VER;   /* v9: flexible body, header v1 */
+    if (mhub->verMetadata >= KAFKA_METADATA_MAX_VER)
+        meta_ver = KAFKA_METADATA_MAX_VER;   /* v8: legacy body + legacy header v1 */
     else if (mhub->verMetadata >= 4)
         meta_ver = 4;
 
-    int flexible_meta = (meta_ver >= KAFKA_METADATA_FLEXIBLE_VERSION);
-
+    /* KAFKA_METADATA_MAX_VER=8 < KAFKA_METADATA_FLEXIBLE_VERSION=9,
+     * so flexible_meta is always false — legacy encoding throughout. */
     ism_kafka_putInt2(buf, MetadataRequest);    /* API key = 3 */
-    ism_kafka_putInt2(buf, meta_ver);           /* version   */
+    ism_kafka_putInt2(buf, meta_ver);           /* version (8) */
     ism_kafka_putInt4(buf, 0x20000);            /* Correlation ID */
-    /*
-     * Request header v2 for flexible MetadataRequest v9+:
-     *   compact clientId (varint len+1) + tagged-fields byte (0x00)
-     *
-     * The OpenShift SNI-passthrough ingress strips exactly ONE byte from every
-     * post-SASL Kafka request header — specifically the 0x00 tagged-fields byte
-     * at the end of the header.  The broker then reads the first body byte in its
-     * place and misparses the request.
-     *
-     * Workaround: prepend an extra 0x00 padding byte before the real tagged-fields.
-     * The ingress strips the first 0x00, the broker receives the real 0x00 tagged-
-     * fields byte and correctly parses the flexible body.
-     *
-     * Wire layout we send (header v2 + 1 padding byte):
-     *   compact clientId | 0x00 (padding, stripped by ingress) | 0x00 (tagged-fields)
-     * What the broker receives (after ingress strips padding):
-     *   compact clientId | 0x00 (tagged-fields) | <flexible body>  ← correct header v2
-     */
-    if (flexible_meta) {
-        putKafkaCompactString(buf, ism_common_getHostnameInfo(), -1); /* compact clientId */
-        ism_kafka_putInt1(buf, 0);          /* 0x00 padding — stripped by SNI ingress */
-        putKafkaTagBuf(buf);                /* 0x00 real tagged-fields, seen by broker */
-    } else {
-        ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1);   /* INT16 clientId */
-    }
+    ism_kafka_putString(buf, ism_common_getHostnameInfo(), -1); /* INT16 clientId, header v1 */
 
-    /* topic array */
-    if (flexible_meta) {
-        putKafkaCompactArrayLen(buf, mhub->topiccount);
-    } else {
-        ism_kafka_putInt4(buf, mhub->topiccount);
-    }
+    /* topic array — legacy INT32 length */
+    ism_kafka_putInt4(buf, mhub->topiccount);
     for (i=0; i<mhub->topiccount; i++) {
         mhub_topic_t * topic = mhub->topics[i];
-        if (flexible_meta) {
-            putKafkaCompactString(buf, topic->name, -1);
-            putKafkaTagBuf(buf);                /* per-topic tagged-fields */
-        } else {
-            ism_kafka_putString(buf, topic->name, -1);
-        }
+        ism_kafka_putString(buf, topic->name, -1);
         TRACE(5, "MessageHub MetadataRequest for topic: %s\n", topic->name);
         topic_count++;
     }
 
     if (meta_ver >= 4) {
-        ism_kafka_putInt1(buf, 0);              /* allow_auto_topic_creation = false */
+        ism_kafka_putInt1(buf, 0);              /* allow_auto_topic_creation = false (v4+) */
     }
-    if (flexible_meta) {
-        putKafkaTagBuf(buf);                    /* request body tagged-fields */
-    }
-    /* Note: v0 had a trailing topic filter string, but v4-v8 do not — removed. */
+    /* No body tagged-fields: v8 is non-flexible. */
 
     LOG(INFO, Server, 979, "%u%s%s%u%s", "MessageHub metadatarequest submitted: connect={0} name={1} server_addr={2} server_port={3} broker={4}",
     		transport->index, transport->name, transport->server_addr, transport->serverport,
